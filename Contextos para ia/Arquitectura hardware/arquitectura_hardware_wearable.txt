@@ -1,0 +1,109 @@
+================================================================================
+WEARABLE DETECCIÓN PRE-ICTAL — ARQUITECTURA DE HARDWARE
+Definiciones acordadas · Revisión 1.0
+================================================================================
+
+1. ARQUITECTURA GENERAL
+────────────────────────
+Dos enclosures rígidos unidos por una correa de silicona o TPU:
+
+  · Módulo DORSAL  (cara externa de la muñeca) — electrónica principal
+  · Módulo VENTRAL (cara interna de la muñeca) — sensores en contacto dérmico
+
+Ambas PCBs son de SIMPLE FAZ con plano de tierra parcial en la misma cara.
+Los cruces de pista se resuelven con jumpers de 0 Ω.
+
+
+2. DISTRIBUCIÓN DE COMPONENTES
+────────────────────────────────
+
+MÓDULO DORSAL — PCB principal
+  · ESP32-C3 SuperMini (MCU)
+  · MPU-6050             (IMU — detección convulsiva, sin contacto dérmico)
+  · MicroSD + conector SPI
+  · TP4056 + DW01A       (carga y protección LiPo)
+  · AP2112K-3.3          (regulador LDO — genera rail 3.3V)
+  · Batería LiPo 503450  (debajo de la PCB)
+  · Conector FPC ZIF 8 pines
+  · LED / buzzer de alerta
+  · Conector USB-C (carga)
+  Layout: zona de potencia y zona de lógica separadas ≥ 8 mm en el mismo plano.
+
+MÓDULO VENTRAL — PCB satélite
+  · AD8232               (frontend ECG)
+  · ADS1115              (ADC 16-bit local — digitaliza ECG y EDA antes del cable)
+  · MCP6002              (frontend EDA/GSR propio)
+  · MAX30205             (temperatura cutánea — isla térmica aislada con ranuras)
+  · Conector FPC ZIF 8 pines
+  · Electrodos RA y LA   (ECG — pines through-hole o cables cortos, lado radial)
+  · Electrodos E1 y E2   (EDA — pines through-hole o cables cortos, lado cubital)
+  · Electrodo RL         (referencia AD8232 — montado en la correa dorsal)
+  MAX30205: ventana en enclosure + interfaz de silicona conductora térmica hacia piel.
+  Electrodos EDA no deben ubicarse entre RA y LA (alteran campo eléctrico del ECG).
+
+
+3. POSICIONAMIENTO DE SENSORES EN LA MUÑECA
+─────────────────────────────────────────────
+
+Cara interna (ventral):
+  · RA y LA del AD8232 — lado radial, separación 4 cm, eje longitudinal al antebrazo
+  · E1 y E2 del GSR    — lado cubital, separación 2–4 cm
+  · MAX30205           — zona distal, isla térmica en contacto con piel
+  
+Cara externa (dorsal):
+  · Electrodo RL       — montado en la correa dorsal (salida baja impedancia del AD8232)
+  · MPU-6050           — dentro del enclosure, sin contacto dérmico
+
+
+4. INTERCONEXIÓN ENTRE MÓDULOS — CABLE FPC
+────────────────────────────────────────────
+
+Cable FPC (Flexible Printed Circuit) — NO FFC con sustrato PET:
+  · Pines:       8
+  · Paso:        0.5 mm
+  · Sustrato:    Poliimida (PI) — vida de flexión > 500.000 ciclos
+  · Cobre:       RA (rolled-annealed) — mayor resistencia a fatiga
+  · Longitud:    80–100 mm
+  · Apantallado: No requerido (solo señales digitales cruzan el cable)
+  · Radio mín.:  ≥ 1.5 mm (zona dinámica en la correa)
+
+Asignación de pines:
+  Pin 1 — VCC 3.3V
+  Pin 2 — GND
+  Pin 3 — SDA  (I²C: ADS1115 0x48 + MAX30205 0x49)
+  Pin 4 — SCL  (I²C: 400 kHz)
+  Pin 5 — GND  (separador entre I²C y digitales lentos)
+  Pin 6 — LO+  (lead-off AD8232 → GPIO2 ESP32)
+  Pin 7 — LO−  (lead-off AD8232 → GPIO3 ESP32)
+  Pin 8 — RLD  (right leg drive AD8232 → electrodo RL en correa dorsal)
+
+Conectores en PCB: ZIF flip-top, ej. Hirose FH12-8S-0.5SH o equivalente.
+Los conectores quedan dentro del enclosure — no son accesibles por el usuario.
+
+CRÍTICO: No hay señales analógicas en el cable. El ADS1115 en el módulo
+ventral digitaliza tanto la salida del AD8232 como la del MCP6002 (GSR)
+antes de que la información cruce al módulo dorsal.
+
+
+5. PROTECCIÓN ELÉCTRICA EN PCB
+────────────────────────────────
+
+Módulo ventral (entrada del conector FPC):
+  · Capacitor 100 nF + 10 µF en VCC al ingreso del conector
+  · Resistencias 22 Ω en serie en SDA y SCL
+  · Pull-up I²C: 2.2 kΩ (en lugar de 4.7 kΩ estándar, compensa capacitancia del cable)
+  · Diodo TVS de baja capacitancia en cada línea del conector hacia GND (protección ESD)
+
+Módulo dorsal (entrada del conector FPC):
+  · Mismo esquema de desacople en VCC
+  · Ferrite bead en VCC antes de la ramificación hacia el módulo satélite
+
+
+6. PENDIENTES A DEFINIR
+────────────────────────
+  · ¿Electrodos como pines through-hole integrados en PCB o como piezas
+    externas conectadas por cable corto al módulo ventral?
+  · Dimensiones finales de cada enclosure (condicionadas al layout de PCB).
+  · Material definitivo de la correa: silicona médica (LSR) o TPU certificado ISO 10993.
+
+================================================================================

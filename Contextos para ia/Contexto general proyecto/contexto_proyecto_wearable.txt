@@ -1,0 +1,740 @@
+================================================================
+DOCUMENTO DE CONTEXTO — PROYECTO DE TESIS
+Wearable de detección pre-ictal para epilepsia refractaria
+Tecnicatura en Electrónica
+Revisión: 4.1 (estado actual del proyecto)
+================================================================
+
+PROPÓSITO DE ESTE DOCUMENTO
+----------------------------
+Registro completo de todas las decisiones técnicas, componentes,
+criterios y debates llevados a cabo durante el desarrollo inicial
+del proyecto. Está pensado para iniciar nuevas conversaciones con
+Claude sin perder el hilo de lo ya acordado. Toda decisión puede
+revisarse, pero se espera que el asistente tenga este contexto
+como punto de partida y no repita debates ya cerrados.
+
+
+================================================================
+1. OBJETIVO Y ALCANCE
+================================================================
+
+El proyecto consiste en diseñar y construir un dispositivo
+wearable de muñeca capaz de detectar de forma temprana y gradual
+un inminente episodio ictal (convulsión) en pacientes con
+epilepsia refractaria. El objetivo clínico es mejorar la calidad
+de vida del paciente y aumentar su autonomía.
+
+Es una tesis de fin de curso de la Tecnicatura en Electrónica,
+por lo que debe ser funcional pero abordable. Esta restricción
+fue un criterio determinante en todas las decisiones de diseño.
+
+LIMITACIÓN CLÍNICA EXPLÍCITA (importante para la defensa):
+El sistema solo detecta con fiabilidad crisis generalizadas
+tónico-clónicas. Las crisis focales sin generalización pueden
+no generar cambios autonómicos periféricos detectables.
+
+RESTRICCIONES DE DISEÑO ACORDADAS:
+- Dispositivo dividido en DOS enclosures (uno por cara de muñeca)
+- Cada enclosure tiene su propia PCB
+- Form factor de pulsera/brazalete en muñeca no dominante
+- Programable en C/C++ desde Arduino IDE
+- Componentes disponibles en Argentina (MercadoLibre) o importación
+- Tamaño compacto para wearable
+- Batería LiPo recargable, autonomía mínima 24 horas
+- Firmware v1 sin BLE/WiFi activo
+- PCB con componentes through-hole (NO diseño SMD)
+
+
+================================================================
+2. PARÁMETROS FISIOLÓGICOS MEDIDOS
+================================================================
+
+Se miden cuatro parámetros complementarios. Todos tienen evidencia
+clínica que avala su manifestación pre-ictal:
+
+2.1 HRV / FRECUENCIA CARDÍACA (parámetro pre-ictal primario)
+-------------------------------------------------------------
+Sensor: AD8232 (ECG 1 derivación)
+Fundamento: El sistema nervioso autónomo modifica el tono vagal
+antes del inicio ictal: la HRV cae, el intervalo R-R se acorta
+y aparece taquicardia sinusal.
+Evidencia:
+- Pinto et al., Scientific Reports 2021: cambios pre-ictales en
+  41% de crisis, 90% de pacientes, ventana de hasta 40 minutos.
+  https://www.nature.com/articles/s41598-021-85350-y
+- Jeppesen et al., Seizure 2018: metaanálisis de 30 estudios,
+  1110 participantes, 2957 crisis. Incremento pre-ictal en 36/100.
+  https://www.sciencedirect.com/science/article/pii/S1059131117307343
+
+DECISIÓN CRÍTICA: se descartó el MAX30102 (PPG óptico) porque
+el PPG de muñeca no detectó el 55% de las crisis por artefactos
+de movimiento en estudios con pacientes refractarios. El ECG
+eléctrico duplicó la sensibilidad.
+
+2.2 ACTIVIDAD ELECTRODÉRMICA / EDA (complementario)
+----------------------------------------------------
+Sensor: Circuito propio con MCP6002 (TIA — amplificador de
+transimpedancia). Se descartó el módulo Grove GSR para la PCB
+final porque el MCP6002 propio ofrece respuesta lineal a la
+conductancia, 16x menos consumo (90µA vs 1.5mA) y mejor
+sensibilidad en el rango de alta resistencia de muñeca (500kΩ-10MΩ).
+El módulo Grove puede usarse en el prototipo de validación.
+Evidencia:
+- Geertsema et al., Epilepsy & Behavior 2022: metaanálisis 19
+  estudios, 82/100 crisis con respuesta EDA. Tónico-clónicas
+  producen las respuestas más pronunciadas.
+  https://www.epilepsybehavior.com/article/S1525-5050(22)00313-4/fulltext
+- Poh et al., Epilepsy & Behavior 2010: muñeca es alternativa
+  viable al sitio palmar para EDA.
+  https://www.researchgate.net/publication/49626957
+
+2.3 MOVIMIENTO / IMU (árbitro del sistema)
+------------------------------------------
+Sensor: MPU-6050 (acelerómetro + giroscopio 6 DoF)
+Rol: Confirma episodio motor una vez iniciado, y descarta falsas
+alarmas de HRV/EDA generadas por ejercicio o movimiento brusco.
+No tiene valor pre-ictal directo. Es el árbitro del sistema.
+Evidencia:
+- Beniczky et al., Epilepsia 2013: 89.7% sensibilidad en crisis
+  tónico-clónicas generalizadas, 0.2 falsas alarmas/día.
+  https://onlinelibrary.wiley.com/doi/abs/10.1111/epi.12120
+
+2.4 TEMPERATURA CUTÁNEA (discriminador secundario)
+--------------------------------------------------
+Sensor: MAX30205 (I²C, ±0.1°C)
+Rol: La vasoconstricción pre-ictal puede bajar la temperatura
+periférica; el ejercicio la sube. Útil para falsas alarmas por
+activación simpática sin movimiento (estrés emocional). Su valor
+está en la fusión multiparamétrica, no como detector aislado.
+Evidencia:
+- Seyal et al., Clinical Neurophysiology Practice 2025: aumento
+  pre-ictal detectado de forma no invasiva.
+  https://www.sciencedirect.com/science/article/pii/S2467981X2500040X
+
+
+================================================================
+3. ARQUITECTURA DE HARDWARE — DOBLE ENCLOSURE
+================================================================
+
+DECISIÓN TOMADA: El dispositivo se divide en DOS módulos/PCBs:
+
+MÓDULO VENTRAL (cara interna/palmar de la muñeca):
+- AD8232 (chip ECG + electrodos RA, LA en cara palmar)
+- ADS1115 (ADC I²C de 16 bits, convierte la señal analógica del
+  AD8232 a I²C para cruzar entre enclosures sin ruido)
+- Circuito MCP6002 (TIA para EDA, electrodos E1, E2 en cara palmar)
+- Electrodo RL del AD8232 (en cara externa/dorsal del brazalete)
+- Posiblemente MAX30205 en cara lateral/dorsal
+
+MÓDULO DORSAL (cara externa/dorsal de la muñeca):
+- Microcontrolador principal
+- MPU-6050 (IMU, sin contacto dérmico, dentro del enclosure)
+- MicroSD (almacenamiento)
+- Batería LiPo
+- Gestión de energía (integrada en MCU o externa según elección)
+
+INTERCONEXIÓN ENTRE MÓDULOS:
+Cable FPC o similar con al menos: VCC, GND, SDA, SCL
+(bus I²C digital transporta los datos del ADS1115 y del MAX30205)
+La señal analógica del AD8232 NO cruza entre enclosures — fue
+convertida a I²C por el ADS1115 en el módulo ventral.
+Esto es clave para evitar ruido en la señal de ECG.
+
+MOTIVO DEL CAMBIO A DOBLE ENCLOSURE:
+Restricción de área de la PCB original (~50×80mm, demasiado grande
+para un dispositivo de muñeca). Al dividir, cada PCB es más
+pequeña y puede ubicarse en la cara correspondiente.
+
+COLOCACIÓN FÍSICA DE SENSORES:
+Cara interna (palmar):
+- Electrodos RA y LA del AD8232: separados ~25-30mm, a lo largo
+  del eje proximal-distal del antebrazo
+- Electrodos E1 y E2 del EDA/MCP6002: orientados TRANSVERSALMENTE
+  (perpendicular al eje ECG) para minimizar interferencia eléctrica
+  entre ambos sistemas. Separados ~20mm.
+
+Cara externa/lateral:
+- Electrodo RL del AD8232 (referencia de masa, maximiza CMRR)
+- MAX30205 (a través de ventana térmica en el enclosure)
+
+Sin contacto dérmico (dentro del enclosure):
+- MPU-6050, MCU, microSD, batería, electrónica de soporte
+
+
+================================================================
+4. MICROCONTROLADOR — ESTADO DE DEBATE
+================================================================
+
+HISTORIAL DE DECISIONES:
+1. Comenzó con Arduino Nano → descartado (poca RAM, sin sleep)
+2. ESP32 DevKit → descartado (demasiado grande, 55×28mm)
+3. ESP32-C3 SuperMini → elegido por disponibilidad local
+4. XIAO ESP32-C3 → propuesto como mejora (cargador integrado)
+5. XIAO ESP32-C5 → investigación en curso al cierre de este chat
+
+ESTADO AL CIERRE:
+La última petición del usuario fue investigar el XIAO ESP32-C5.
+Esa tarea fue ABORTADA por el usuario. La decisión final de MCU
+está PENDIENTE. Las dos opciones principales son:
+
+OPCIÓN A: XIAO ESP32-C3 (Seeed Studio)
+Chip: ESP32-C3, RISC-V 32-bit, 160MHz, 400KB SRAM, 4MB Flash
+Tamaño: 21 × 17.5mm
+Cargador LiPo: SÍ — ETA4054 integrado, corriente FIJA 370mA
+  → Elimina módulo TP4056
+  → Batería mínima: 370mAh (nuestra de 500-600mAh es compatible)
+Regulador 3.3V: integrado en placa → Elimina AP2112K
+Deep sleep: 44µA (sin LED de usuario → sin conflicto GPIO)
+I²C: GPIO6 (SDA) / GPIO7 (SCL) — SIN conflicto con LED
+SPI: GPIO8 (SCK) / GPIO9 (MISO) / GPIO10 (MOSI)
+ADC disponibles: GPIO2, GPIO3, GPIO4, GPIO5 (4 canales)
+GPIO totales expuestos: 11
+Antena: U.FL con antena externa
+Pads castellados: SÍ (útil para SMD, pero proyecto es through-hole)
+Disponibilidad Argentina: media, generalmente importación
+IDE: Arduino IDE, placa "XIAO_ESP32C3" en Espressif core
+VENTAJA CLAVE: elimina TP4056 y AP2112K → ahorro de espacio
+
+OPCIÓN B: ESP32-C3 SuperMini (genérico)
+Chip: ESP32-C3, RISC-V 32-bit, 160MHz, 400KB SRAM, 4MB Flash
+Tamaño: 22.5 × 18mm
+Cargador LiPo: NO → requiere TP4056 externo
+Regulador 3.3V: LDO interno con limitaciones desde LiPo → requiere AP2112K
+Deep sleep: 43µA + LED en GPIO8 (conflicto con SDA del I²C)
+I²C: GPIO8 (SDA) / GPIO9 (SCL) — GPIO8 comparte con LED integrado
+  → Requiere: pinMode(8,OUTPUT); digitalWrite(8,LOW); en setup()
+SPI: GPIO4 (SCK) / GPIO5 (MISO) / GPIO6 (MOSI) / GPIO7 (CS)
+ADC útiles: GPIO0, GPIO1, GPIO2, GPIO3
+GPIO totales: 13
+Disponibilidad Argentina: ALTA — MercadoLibre, múltiples vendedores
+IDE: Arduino IDE, placa "esp32c3 Dev Module"
+VENTAJA CLAVE: disponibilidad local inmediata
+
+OPCIÓN C: XIAO ESP32-C5 (investigación abortada, pendiente)
+Datos parciales obtenidos:
+- Chip: ESP32-C5, RISC-V, 240MHz (más rápido que C3)
+- RAM: 384KB SRAM + 8MB PSRAM (MUCHO más que C3)
+- Flash: 8MB
+- Wi-Fi: dual-band 2.4GHz + 5GHz (Wi-Fi 6)
+- BLE 5, Zigbee, Thread
+- Deep sleep: ~15µA (mejor que C3)
+- Cargador LiPo: SÍ (SGM40567, corriente 100mA — MÁS BAJA que C3)
+- 5 canales ADC expuestos (más que C3)
+- I²C: D4/D5 (misma disposición que XIAO ESP32-C3)
+- SPI: D8/D9/D10 (misma disposición)
+- Mismo form factor 21×17.8mm
+- Lanzado mayo 2025, disponibilidad limitada
+- La investigación completa de este MCU fue abortada por el usuario
+
+NOTA IMPORTANTE: Independientemente del MCU elegido, la cadena
+de alimentación cambia según la opción:
+- Con XIAO C3 o C5: batería JST → MCU (carga + regulación interna)
+- Con SuperMini: batería → TP4056 → LiPo → AP2112K → 3.3V rail
+
+CRÍTICO DE TENSIÓN (aplica solo sin regulación integrada):
+LiPo a 4.2V (carga completa) excede:
+- AD8232 máx: 3.5V → DAÑO PERMANENTE si no se regula
+- ESP32-C3 chip VDD máx: 3.6V
+Todos los componentes deben alimentarse desde rail 3.3V regulado.
+
+
+================================================================
+5. COMPONENTES CONFIRMADOS (independientes del MCU elegido)
+================================================================
+
+5.1 SENSOR ECG: AD8232
+Datasheet: https://www.analog.com/media/en/technical-documentation/data-sheets/ad8232.pdf
+Alimentación: 2.0V – 3.5V (compatible con 3.3V)
+Corriente: 170µA típico
+Salida: Analógica → al ADS1115 en el módulo ventral
+Filtros integrados: HP 0.5Hz (2 polos) + LP 40Hz (3 polos)
+Ganancia IA: 100 V/V (fija), CMRR: 80dB
+Detección electrodos: LO+ y LO- (GPIO digitales del MCU)
+Electrodos: RA + LA (cara palmar, ~25-30mm) + RL (cara dorsal)
+Librería Arduino: SparkFun HeartRate
+
+5.2 CONVERSIÓN ECG A I²C: ADS1115
+Razón: La señal analógica del AD8232 no puede cruzar entre
+enclosures sin degradarse. El ADS1115 la digitaliza en el módulo
+ventral y la envía por I²C (inmune al ruido).
+Alimentación: 2.0V – 5.5V (compatible con 3.3V)
+Resolución: 16 bits, hasta 860 SPS
+Modo diferencial: AIN0 = salida AD8232, AIN1 = VREF (1.65V)
+PGA recomendado: ±2.048V → resolución 62.5µV/bit
+Dirección I²C: configurable (0x48, 0x49, 0x4A, 0x4B)
+ATENCIÓN - Jitter con ALERT/RDY:
+- El pulso ALERT/RDY tiene solo 8µs → usar flanco FALLING
+- Habilitar LATCH del comparador para no perder conversiones
+- Usar modo interrupt-driven, NO polling
+- A 860 SPS: precisión R-R = ±1.16ms (aceptable para tendencias)
+- Con interpolación parabólica: mejora a ±0.25ms
+ATENCIÓN - Cable inter-enclosure:
+- I²C a 400kHz: capacitancia máxima admisible ~300pF
+- Cable de muñeca (~20-30cm): ~60-80pF
+- Reducir pull-ups a 2.2kΩ o bajar bus a 100kHz (más seguro)
+- A 100kHz con ADS1115 a 475 SPS: 36% ocupación del bus (OK)
+Librería Arduino: Adafruit_ADS1X15
+
+5.3 IMU: MPU-6050 (módulo GY-521)
+Datasheet: https://invensense.tdk.com/wp-content/uploads/2015/02/MPU-6000-Datasheet1.pdf
+Alimentación: 2.375V – 3.46V (compatible con 3.3V)
+Corriente activa completa: 3.6mA
+Corriente accel only low-power (40Hz): ~140µA
+Corriente sleep: 5µA
+Interfaz: I²C 400kHz, dirección 0x68 (AD0=LOW)
+Rango acelerómetro: ±16g para detección de crisis motoras
+REGISTROS CORRECTOS para low-power accel en MPU-6050:
+  PWR_MGMT_1 (0x6B) = 0x20  → CYCLE=1 (modo cíclico)
+  PWR_MGMT_2 (0x6C) = 0xC7  → LP_WAKE=40Hz + STBY gyros
+  MOT_THR    (0x1F) = 0x20  → Umbral ~0.5g
+  MOT_DUR    (0x20) = 0x01  → 1ms duración mínima
+  INT_ENABLE  (0x38) = 0x40 → Interrupción por movimiento
+  INT_PIN_CFG (0x37) = 0x10 → Clear en cualquier lectura
+ADVERTENCIA: Los registros 0x1D (ACCEL_CONFIG2) y 0x1E
+(LP_MODE_CTRL) NO EXISTEN en el MPU-6050. Son del MPU-6500/9250.
+NO usar el DMP: requiere firmware especial, innecesario para este proyecto.
+Librería: Adafruit_MPU6050
+
+5.4 TEMPERATURA: MAX30205
+Datasheet: https://www.analog.com/en/products/max30205.html
+Alimentación: 2.7V – 3.3V (compatible con 3.3V)
+Corriente: 600µA activo, ~1µA shutdown
+Interfaz: I²C, dirección 0x48 (no conflicta con MPU-6050 en 0x68)
+Resolución: 16 bits, 0.00390625°C/bit, ±0.1°C en 37-39°C
+Frecuencia de lectura: 1 muestra cada 15s (shutdown entre lecturas)
+Integración en PCB: requiere contacto térmico directo con la piel.
+El módulo CJMCU-MAX30205 (disponible en ML Argentina) NO incluye
+la base de aluminio del módulo ProtoCentral.
+Soluciones para transferencia térmica:
+- Opción A: lámina de cobre/aluminio 8×8mm pegada con adhesivo
+  térmico sobre el encapsulado, apoyada contra la piel
+- Opción B: ventana en el enclosure con gel de silicona térmico
+El offset por conducción subóptima puede ser 0.5-1°C (aceptable
+para detectar tendencias relativas). Calibrar vs termómetro clínico.
+Librería: ProtoCentral_MAX30205
+
+5.5 SENSOR EDA: Circuito propio con MCP6002
+Topología: Amplificador de transimpedancia (TIA) en DC
+Componentes por placa:
+  MCP6002 (dual op-amp DIP-8 o SOT-23-8): 1x
+  R1 = R2 = 100kΩ ±1% (divisor VREF)
+  C1 = 100nF (bypass VREF)
+  R_drive = 100kΩ (limita corriente a piel a <3µA — seguro)
+  Rf = 470kΩ (ganancia TIA, determina rango de salida)
+  Cf = 22nF (estabilidad + filtro 15.4Hz)
+  C_bypass = 100nF (desacople VCC del MCP6002)
+  Electrodos: 2x acero inoxidable 316L o Ag/AgCl (~1cm², ~20mm sep.)
+Funcionamiento:
+  Op-amp A: bufferiza VREF = VCC/2 = 1.65V
+  Op-amp B (TIA): Electrode 2 forzado a VREF (tierra virtual).
+  I_skin = (VCC - VREF) / (R_drive + R_skin)
+  V_out = VREF - I_skin × Rf
+Rango de salida para muñeca (R_skin 500kΩ-10MΩ):
+  R_skin=500kΩ: V_out≈0.36V | R_skin=1MΩ: V_out≈0.95V
+  R_skin=5MΩ:  V_out≈1.50V | R_skin=10MΩ: V_out≈1.57V
+Corriente máxima en piel: 3.24µA (imperceptible, seguro)
+Salida → ADC del MCU (GPIO) o canal adicional del ADS1115
+VARIANTE AC (elimina polarización de electrodos, sin hardware extra):
+  GPIO libre genera onda cuadrada 128Hz
+  Demodulación por software: muestreo sincronizado × signo de ref + IIR
+  ~25 líneas adicionales de firmware
+
+VENTAJAS vs Grove GSR:
+  - Respuesta LINEAL con conductancia G (no con R como el Grove)
+  - Sensibilidad 10-50× mayor en rango de muñeca
+  - 90µA vs 1.5mA del Grove (16× más eficiente)
+  - Sin módulo externo, integrado en PCB
+  - Control total del plano de tierra analógico
+
+PCB LAYOUT CRÍTICO para MCP6002:
+  - Plano AGND separado del DGND
+  - AGND y DGND unidos en punto estrella bajo el regulador
+  - Trazas de electrodo rodeadas por traza guardia a VREF
+  - C_bypass de 100nF directamente en pines VDD/GND del chip
+  - Filtros RC en entradas ADC: 100Ω + 10nF (ECG), 100Ω + 100nF (EDA)
+
+5.6 ALMACENAMIENTO: Módulo microSD SPI
+Interfaz: SPI hardware
+Formato: FAT32 (obligatorio — exFAT no soportado por defecto)
+Corriente: ~30mA ráfaga escritura, ~0.05mA power-down
+Librería: SD.h + SPI.h (incluidas en core ESP32)
+ESTRATEGIA DE ALMACENAMIENTO POR NIVELES:
+  Nivel 1 (normal): features calculadas cada 5s
+    campos: HR, RMSSD, score_motor, EDA, temp, score_preictal, alerta
+  Nivel 2 (alerta activa): features + señales crudas a 50Hz
+  Nivel 3 (post-evento): señales crudas 5min a 50Hz
+ARCHIVOS EN MICROSD:
+  datos/YYYYMMDD.csv → registro diario con todos los niveles
+  config/config.txt  → umbrales calibrados por paciente
+  config/baseline.txt → percentiles de línea de base
+  config/temp_offset.txt → offset de temperatura individual
+  log/errores.txt → errores, reinicios
+
+5.7 BATERÍA
+Tipo: LiPo 3.7V nominal
+Capacidad recomendada: 600mAh (mínimo 500mAh)
+Con cargador integrado (XIAO): JST 1.25mm 2P
+Con TP4056 externo (SuperMini): batería con protección integrada
+ATENCIÓN: si se usa XIAO C3, corriente de carga FIJA = 370mA
+  → No usar baterías <370mAh sin protección dedicada
+  → Con 500mAh: 0.74C, con 600mAh: 0.62C (ambos seguros)
+
+
+================================================================
+6. MAPA DE PINES (DEPENDE DEL MCU FINAL ELEGIDO)
+================================================================
+
+CON XIAO ESP32-C3 (11 GPIO disponibles: 2,3,4,5,6,7,8,9,10,20,21):
+  GPIO2 → AD8232 LO+ (digital IN)
+  GPIO3 → AD8232 LO- (digital IN)
+  GPIO4 → GSR/EDA (ADC — salida MCP6002 TIA)
+  GPIO5 → libre o signal adicional
+  GPIO6 → I²C SDA (ADS1115 + MPU-6050 + MAX30205)
+  GPIO7 → I²C SCL
+  GPIO8 → SPI SCK (microSD)
+  GPIO9 → SPI MISO
+  GPIO10 → SPI MOSI
+  GPIO20 → SPI CS (microSD)
+  GPIO21 → Alerta (LED/buzzer)
+NOTA: Con XIAO C3, el bus I²C está en GPIO6/7 (NO GPIO8/9 como SuperMini)
+
+CON ESP32-C3 SuperMini (13 GPIO):
+  GPIO0 → ECG analógico (ADC1 ch0) — AHORA reemplazado por ADS1115 en I²C
+  GPIO1 → EDA analógico (ADC1 ch1, salida MCP6002)
+  GPIO2 → AD8232 LO+
+  GPIO3 → AD8232 LO-
+  GPIO4 → SPI SCK (microSD)
+  GPIO5 → SPI MISO
+  GPIO6 → SPI MOSI
+  GPIO7 → SPI CS
+  GPIO8 → I²C SDA (LED integrado → requiere digitalWrite(8,LOW))
+  GPIO9 → I²C SCL
+  GPIO10 → Alerta (LED/buzzer)
+  GPIO20/21 → UART debug (reservados)
+
+
+================================================================
+7. CADENA DE ALIMENTACIÓN
+================================================================
+
+CON XIAO ESP32-C3 o C5 (recomendado):
+  USB-C → ETA4054 integrado → LiPo JST
+  LiPo → regulador integrado en XIAO → 3.3V rail → todos los sensores
+  Sin módulos externos de carga ni regulación
+
+CON ESP32-C3 SuperMini:
+  USB → TP4056 + DW01A → LiPo → AP2112K-3.3 (dropout 0.3V) → 3.3V rail
+  CRÍTICO: sin AP2112K, la LiPo a 4.2V dañaría el AD8232
+  El LDO interno del SuperMini tiene dropout alto, no regula bien desde LiPo
+
+COMPATIBILIDAD DE TENSIONES (crítica):
+  ESP32-C3 chip VDD: 3.0V – 3.6V
+  AD8232: 2.0V – 3.5V (máximo 3.5V — el más restrictivo)
+  MPU-6050 chip: 2.375V – 3.46V
+  MAX30205: 2.7V – 3.3V
+  GSR/MCP6002: 1.8V – 5.5V
+  MicroSD módulo: 3.3V – 5V (tiene regulador interno)
+  → TODOS deben alimentarse desde 3.3V regulado, NUNCA desde LiPo directa
+
+
+================================================================
+8. ARQUITECTURA DE FIRMWARE
+================================================================
+
+8.1 MÁQUINA DE ESTADOS ESCALONADA (rev. 4 — arquitectura actual)
+  Estado IDLE (5s):
+    MCU en light sleep
+    IMU en accel low-power 40Hz
+    AD8232 activo (analógico, no tiene modo sleep)
+    GSR/EDA apagado por GPIO
+    MAX30205 en shutdown
+  Estado SAMPLE (3s activo):
+    MCU activo 100%
+    ADS1115 leyendo ECG a hasta 475 SPS
+    IMU a 50Hz (salida del modo low-power)
+    EDA a 10Hz
+    MAX30205: 1 muestra por ciclo
+  Estado FUSE (<5ms):
+    Calcula: R-R, RMSSD, score motor, nivel EDA, delta temperatura
+    Genera score pre-ictal 0-100
+  Estado DECIDE (<2ms):
+    Evalúa score vs umbrales calibrados
+    Actualiza nivel de alerta (0-3)
+    Activa GPIO alerta si nivel ≥ 1
+  Estado WRITE_SD (<50ms):
+    Escribe en microSD según nivel de alerta (nivel 1, 2 o 3)
+  Estado INTENSIVE (5 minutos):
+    Muestreo continuo, sin sleep
+    Graba señales crudas (nivel 3)
+    Activa cuando score ≥ umbral_1
+
+RAZÓN DE VENTANA DE 3s (CRÍTICA):
+  La ventana de 200ms original (del diseño anterior) era INSUFICIENTE
+  para calcular HRV real. A 60bpm, el intervalo R-R es 1000ms.
+  En 200ms no entran dos picos R → no se puede calcular HRV.
+  Con 3s a 250Hz = 750 muestras → 3 a 5 latidos completos → 2-4 R-R.
+  Este es el mínimo funcional para calcular RMSSD.
+
+8.2 LÓGICA DE ALERTA GRADUADA
+  Nivel 0: score < umbral_1 → sin acción
+  Nivel 1: score > umbral_1 sostenido ≥2 ciclos, sin movimiento brusco
+           → LED intermitente lento + modo INTENSIVE
+  Nivel 2: score > umbral_2 sostenido ≥3 ciclos, sin patrón ejercicio
+           → LED + tono intermitente
+  Nivel 3: score > umbral_3 + patrón convulsivo en IMU
+           → Alarma sostenida + grabación nivel 3
+
+8.3 CALIBRACIÓN POR PACIENTE
+  Los umbrales NO son fijos. Requieren:
+  - 24-48h de uso normal en modo solo-registro (sin alertas)
+  - Procesamiento offline en Python: calcular percentiles individuales
+  - Umbrales = Percentil 95 + 1.5×IQR de cada parámetro en reposo
+  - Resultados escritos en config/config.txt en microSD
+  - Firmware lee config.txt al arrancar; si no existe: solo registra
+
+8.4 RESTRICCIONES DE MEMORIA (críticas para ESP32-C3)
+  400KB SRAM total (sin PSRAM)
+  - Ventana de análisis en RAM: máximo 20s de ECG a 250Hz (~10KB)
+  - NO usar clase String de Arduino → usar sprintf() con char[64]
+  - NO usar malloc/free → buffers circulares estáticos
+  - Todo el historial va a microSD, nunca se acumula en RAM
+
+8.5 LIBRERÍAS
+  Wire.h         → core ESP32 (I²C)
+  SPI.h          → core ESP32 (SPI)
+  SD.h           → core ESP32 (FAT32)
+  Adafruit_ADS1X15 → Library Manager (ADS1115)
+  Adafruit_MPU6050 → Library Manager (IMU)
+  Adafruit_Sensor  → Library Manager (dependencia MPU)
+  SparkFun HeartRate → Library Manager (detección pico R)
+  ProtoCentral_MAX30205 → Library Manager (temperatura)
+
+
+================================================================
+9. VALIDACIÓN DEL ALGORITMO
+================================================================
+
+PRIMERA ETAPA (sin pacientes, sin aprobación ética):
+  Dataset WESAD (Wearable Stress and Affect Detection)
+  Contiene: acelerómetro, BVP, EDA, temperatura de muñeca
+  Permite validar el pipeline de procesamiento sin esperar crisis reales
+
+DATASET DESCARTADO: CHB-MIT
+  Es EEG intracraneal pediátrico. NO tiene señales de muñeca.
+  NO es válido para validar este sistema. Mencionarlo en la tesis
+  como dataset incorrecto para este tipo de dispositivo.
+
+SEGUNDA ETAPA (con pacientes):
+  Requiere aprobación de comité de bioética institucional
+  La fase de calibración (48h registro) puede hacerse en período estable
+  Validación de alertas: necesita al menos una crisis documentada
+
+
+================================================================
+10. DISEÑO DE PCB
+================================================================
+
+HERRAMIENTA: En debate. Opciones evaluadas:
+  EasyEDA: ya dominada por el desarrollador, flujo directo a JLCPCB
+  KiCad: formato abierto, compatible con Git, editor 3D, Python API
+
+DECISIÓN TENTATIVA: EasyEDA para prototipo, KiCad para versión final
+
+TIPO DE PCB: Through-hole (NO SMD). Componentes con pines/headers
+tradicionales. El XIAO tiene pines/headers estándar, el MCP6002
+en DIP-8, módulos breakout con headers, etc.
+
+KICAD + PYTHON: KiCad tiene API Python completa (módulo pcbnew).
+  Tres modalidades: consola interactiva, scripts externos, plugins.
+  Caso de uso para este proyecto: verificar restricciones físicas
+  del enclosure (footprints dentro del área de diseño, alineación
+  de electrodos con ventanas de la carcasa).
+
+REGLAS DE LAYOUT CRÍTICAS para señales analógicas:
+  1. Plano AGND separado del DGND, unidos en punto estrella
+  2. Filtros RC en entradas ADC (100Ω + 10nF para ECG, 100Ω + 100nF EDA)
+  3. Traza guardia (a VREF) alrededor de trazas de alta impedancia
+  4. C_bypass 100nF directamente en pines VCC/GND de cada IC analógico
+  5. No cruzar trazas de alta corriente (SPI, switching) sobre zona analógica
+
+
+================================================================
+11. PROYECTO DE REFERENCIA (Safe-Care, 2022)
+================================================================
+
+Proyecto de detección de caídas de adultos mayores (Españon, Giraudo, Ramos).
+Objetivo distinto al nuestro, pero proceso de desarrollo comparable.
+
+APROVECHABLE:
+  ejemplo_adxl_345.ino → plantilla de driver I²C por registros.
+    Mismo patrón Wire.beginTransmission → write → requestFrom → read.
+    Cambiar dirección 0x53→0x68 y registros del MPU-6050.
+  ADXL345.h → arquitectura de driver IMU: mapeo de registros,
+    interrupciones, power management. Referencia conceptual.
+  Diagramas de flujo.pdf → estructura de máquina de estados:
+    evento anómalo → ventana → clasificación → alerta graduada.
+    Sustituir variables de caída por score pre-ictal.
+  Proyecto KiCad → template de esquemático: etiquetas globales I²C
+    (SDAP, SCLP), manejo de símbolos VCC/GND.
+  Informe final pág. 23 → metodología análisis energético.
+
+NO APROVECHABLE:
+  MAX30100 (PPG): inadecuado, los autores reportaron inestabilidad.
+  Arduino Uno: incompatible con ESP32-C3.
+  GPS y GSM: fuera del alcance de nuestro proyecto.
+
+
+================================================================
+12. PROBLEMAS IDENTIFICADOS Y ESTADO DE RESOLUCIÓN
+================================================================
+
+[RESUELTO] PPG de muñeca: 55% de crisis no detectadas por movimiento
+  → Reemplazado por AD8232 (ECG eléctrico)
+
+[RESUELTO] LiPo 4.2V excede máximos del AD8232 y ESP32-C3
+  → Con XIAO: regulación integrada
+  → Con SuperMini: cadena TP4056 + AP2112K
+
+[RESUELTO] Sin cargador LiPo en SuperMini
+  → Módulo TP4056 externo (si se elige SuperMini)
+  → Con XIAO: ETA4054 integrado
+
+[RESUELTO] Ventana de 200ms insuficiente para HRV real
+  → Arquitectura escalonada: 3s activo / 5s sleep
+
+[RESUELTO] Registros MPU-6050 incorrectos (0x1D, 0x1E de MPU-6500)
+  → Tabla de registros correcta documentada (ver Sección 5.3)
+
+[RESUELTO] Dataset CHB-MIT inadecuado para validación wrist signals
+  → Reemplazado por WESAD
+
+[RESUELTO] Sin almacenamiento local
+  → MicroSD + estrategia de almacenamiento por niveles
+
+[RESUELTO] GPIO8 SuperMini comparte SDA e LED integrado
+  → Con XIAO: I²C en GPIO6/7 (sin conflicto)
+  → Con SuperMini: digitalWrite(8, LOW) en setup()
+
+[RESUELTO] Jitter ADS1115 con polling
+  → Usar interrupción FALLING en pin ALERT/RDY con LATCH activado
+
+[RESUELTO] Capacitancia del cable inter-enclosure a 400kHz
+  → Reducir pull-ups a 2.2kΩ o bajar bus a 100kHz
+
+[PENDIENTE] Calibración individual por paciente
+  → Diseñado el flujo, pendiente implementación en firmware
+
+[PENDIENTE] Umbrales numéricos de alerta
+  → Definir con neuróloga y con datos reales del paciente
+
+[PENDIENTE] Decisión final de MCU (C3 vs C5)
+  → Investigación del C5 fue abortada, pendiente retomar
+
+[PENDIENTE] Sin RTC para timestamps absolutos
+  → Trabajo futuro: DS3231 por I²C
+
+[DECLARADO EN ALCANCE] Crisis focales posiblemente no detectables
+  → Limitación explícita en la tesis
+
+[PARCIALMENTE DEFINIDO] Plan de validación clínica con pacientes
+  → WESAD como primera etapa; bioética + neurólogo para segunda
+
+
+================================================================
+13. CONSULTAS PENDIENTES CON LA NEURÓLOGA
+================================================================
+
+La reunión con la neuróloga especialista en epilepsia ya fue
+organizada. Se recomienda preguntar:
+
+1. ¿Qué tipos de crisis maneja la población refractaria local?
+   ¿Hay aura objetivable?
+2. ¿Qué haría el paciente o su entorno con la alerta?
+   (define la ventana de utilidad clínica)
+3. ¿Cuántas falsas alarmas por día son tolerables?
+4. ¿Qué acceso hay a vídeo-EEG ambulatorio para validación?
+5. ¿Qué sensibilidad mínima sería clínicamente útil?
+6. ¿Cuántos minutos de ventana pre-ictal son necesarios para
+   que la alerta sea accionable (tomar medicación de rescate,
+   sentarse, alejarse de zona peligrosa)?
+
+Para la reunión, se explicó el funcionamiento físico de cada sensor:
+- AD8232: mide campo eléctrico del corazón que se propaga al cuerpo
+- MPU-6050: MEMS piezoeléctrico, detecta cambios de capacitancia
+  por desplazamiento de masa de prueba (Coriolis para giroscopio)
+- MAX30205: transistor bipolar cuya V_BE varía linealmente con temperatura
+- GSR/MCP6002: aplica corriente <3µA entre electrodos, mide resistencia
+  de la piel (inversamente proporcional a actividad de glándulas sudoríparas)
+
+
+================================================================
+14. PRESUPUESTO ENERGÉTICO (referencia, depende del MCU final)
+================================================================
+
+Con XIAO ESP32-C3, Escenario B (muestreo escalonado, objetivo v1):
+
+Componente              Consumo promedio (duty cycle aplicado)
+ESP32-C3 XIAO           ~19.25 mA (37.5% activo, 62.5% light sleep)
+Regulador integrado     ~0.10 mA
+AD8232                  0.17 mA (siempre activo, analógico)
+ADS1115                 ~0.15 mA (interrupts + conversiones)
+MPU-6050 (LP accel)     ~1.47 mA
+MCP6002 EDA             ~0.09 mA (90µA)
+MAX30205                ~0.04 mA (shutdown entre lecturas)
+MicroSD                 ~1.50 mA (ráfagas cada 5-10s)
+TOTAL ESTIMADO          ~22.8 mA
+
+Autonomía con 600mAh (85% eficiencia): ~22.4 horas
+Autonomía con 500mAh (85% eficiencia): ~18.6 horas
+
+Para superar 24h con 500mAh: reducir duty cycle o bajar a 475 SPS
+en ADS1115 (ahorra ~1mA adicional).
+
+
+================================================================
+15. DOCUMENTOS GENERADOS EN ESTE CHAT
+================================================================
+
+- especificaciones_tecnicas_wearable_v4.docx (última versión completa)
+  → Necesita actualización a v5 con el MCU final (pendiente)
+- contexto_proyecto_wearable.docx (versión anterior de este contexto)
+- Gantt_Wearable.xlsx (diagrama de Gantt en blanco, para completar)
+- resumen_gsr_vs_mcp6002.docx (comparativa Grove GSR vs MCP6002)
+- Proyecto_Final.docx (revisión externa recibida y evaluada)
+
+EVALUACIÓN DEL Proyecto_Final.docx (revisión externa):
+  CORRECTAS: secciones 3.1, 3.2, 3.3, 4.1, 4.3, 4.4, 5.1-5.4
+  CON ERROR TÉCNICO: sección 3.4 — registros 0x1D y 0x1E del
+  MPU-6050 NO EXISTEN en ese chip (son del MPU-6500/9250).
+  CON ADVERTENCIA: sección 4.2 — citas bibliográficas deben
+  verificarse en PubMed antes de incluir en la tesis.
+
+
+================================================================
+16. NOTAS FINALES PARA EL ASISTENTE EN NUEVAS CONVERSACIONES
+================================================================
+
+- El usuario trabaja con precisión técnica y corrige asunciones
+  incorrectas. No introducir inferencias no respaldadas.
+- Preferencia por análisis estructurado: tablas, capas de criticidad
+  (crítico / importante / recomendable), justificación técnica concreta.
+- Los documentos y deliverables se generan en español.
+- El proyecto usa terminología técnica específica: FAR, HRV, RMSSD,
+  pre-ictal, interictal, TIA, FPC, ZIF, duty cycle, etc.
+- Los sensores ya están definidos. No sugerir reemplazos a menos
+  que el usuario lo pida explícitamente.
+- La decisión de doble enclosure está tomada y no debe cuestionarse.
+- La decisión de PCB through-hole (no SMD) está tomada.
+- La decisión de no usar BLE/WiFi en firmware v1 está tomada.
+- El MCU final (entre XIAO C3, XIAO C5 y SuperMini) está PENDIENTE.
+- La investigación del XIAO ESP32-C5 fue ABORTADA antes de completarse.
+- El documento de especificaciones técnicas v5 está PENDIENTE
+  (requiere actualización con MCU final elegido).
+- La reunión con la neuróloga ya fue organizada (pendiente realizarse).
+- Próxima tarea pendiente al cierre: generar el documento de
+  especificaciones técnicas v5 con el MCU final elegido.
+
+================================================================
+FIN DEL DOCUMENTO DE CONTEXTO
+================================================================

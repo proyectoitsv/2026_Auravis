@@ -1,0 +1,384 @@
+/*
+================================================================
+ TEST DE HARDWARE — PCB DORSAL (AISLADO)
+ Proyecto: Wearable de detección pre-ictal — Rev. contexto 5.1
+================================================================
+
+OBJETIVO:
+  Probar de forma aislada TODO lo que ya está soldado en el PCB
+  dorsal, sin depender del módulo ventral (AD8232, ADS1115,
+  Grove GSR, MAX30205 NO se prueban acá) ni de la microSD
+  (todavía no está montada).
+
+QUÉ SE PRUEBA EN ESTE ARCHIVO:
+  1. LED de usuario          -> GPIO15
+  2. LED/transistor de alerta -> GPIO21
+  3. Bus I2C HP (SDA=GPIO22 / SCL=GPIO23)
+  4. MPU-6050 (acelerómetro + giróscopo), dirección 0x68
+  5. Pin INT del MPU-6050 -> GPIO2 (RTC GPIO)
+  6. Wakeup desde deep sleep por movimiento (ext1 en GPIO2 -
+     el C6 no soporta ext0, a diferencia del ESP32 clasico)
+  7. Lógica de alerta graduada simplificada (movimiento -> GPIO21)
+
+QUÉ NO SE PRUEBA ACÁ (requiere módulo ventral o falta montar):
+  - AD8232 (ECG), LO+/LO- (GPIO0/GPIO1), RLD
+  - ADS1115 (0x49), Grove GSR, MAX30205 (0x48)
+  - microSD (SPI: GPIO18/19/20) -> placa aún no montada
+  - LP Core (v2, requiere ESP-IDF, no soportado en Arduino core
+    para C6 todavía) -> se documenta pero no se ejercita
+
+LIBRERÍAS NECESARIAS (Arduino IDE > Administrador de bibliotecas):
+  - Adafruit MPU6050
+  - Adafruit Unified Sensor
+  - Adafruit BusIO
+  (Wire.h ya viene con el core ESP32)
+
+PLACA (Arduino IDE): "XIAO_ESP32C6" (Espressif core >= 2.0.8)
+
+MODO DE USO:
+  1. Cargar este sketch (podés renombrar el .txt a .ino).
+  2. Abrir el Monitor Serie a 115200 baudios.
+  3. Al bootear se corre un self-test automático de LEDs e I2C.
+  4. Después queda un menú por Serial para probar cada cosa
+     por separado, más un modo continuo de monitoreo del IMU
+     con disparo de alerta simulado.
+
+================================================================
+*/
+
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+
+// ---------------- MAPA DE PINES (según Sección 6 del contexto) ----------------
+#define PIN_LED_USUARIO   15   // LED usuario, strapping pin -> LOW en boot
+#define PIN_LED_ALERTA    21   // LED/transistor de alerta (digital OUT)
+#define PIN_I2C_SDA       22   // HP I2C SDA
+#define PIN_I2C_SCL       23   // HP I2C SCL
+#define PIN_MPU_INT        2   // INT del MPU-6050 -> RTC GPIO, ext0 wakeup
+
+#define MPU_ADDR        0x68   // AD0 = LOW
+
+// Umbral simple de "movimiento" para la prueba de alerta (magnitud en g,
+// restando 1g de gravedad). Ajustar a gusto durante la prueba en banco.
+#define UMBRAL_ALERTA_G   1.5
+
+Adafruit_MPU6050 mpu;
+bool mpu_ok = false;
+
+// ================================================================
+// UTILIDADES DE BAJO NIVEL PARA REGISTROS DEL MPU-6050
+// (según Sección 5.3 del contexto: registros correctos verificados,
+//  0x1D/0x1E NO existen en este chip, no usar esos valores)
+// ================================================================
+void mpuWriteReg(uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(reg);
+  Wire.write(val);
+  Wire.endTransmission();
+}
+
+uint8_t mpuReadReg(uint8_t reg) {
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(reg);
+  Wire.endTransmission(false);
+  Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)1);
+  if (Wire.available()) return Wire.read();
+  return 0xFF;
+}
+
+// Configura el detector de movimiento por hardware del MPU-6050,
+// tal como está documentado en el contexto (Sección 5.3 / 9).
+// Esto es lo que en producción despertaría al MCU vía GPIO2.
+void configurarInterrupcionMovimiento() {
+  mpuWriteReg(0x6B, 0x20); // PWR_MGMT_1  -> CYCLE = 1 (modo cíclico)
+  mpuWriteReg(0x6C, 0xC7); // PWR_MGMT_2  -> LP_WAKE 40Hz + STBY gyros
+  mpuWriteReg(0x1F, 0x20); // MOT_THR     -> umbral ~0.5g
+  mpuWriteReg(0x20, 0x01); // MOT_DUR     -> 1 ms duración mínima
+  mpuWriteReg(0x38, 0x40); // INT_ENABLE  -> interrupción por movimiento
+  mpuWriteReg(0x37, 0x10); // INT_PIN_CFG -> clear en cualquier lectura
+}
+
+// ================================================================
+// SETUP
+// ================================================================
+void setup() {
+  Serial.begin(115200);
+  uint32_t t0 = millis();
+  while (!Serial && millis() - t0 < 3000) { delay(10); } // espera USB CDC, no bloquea si no hay PC
+
+  // --- LEDs ---
+  pinMode(PIN_LED_USUARIO, OUTPUT);
+  digitalWrite(PIN_LED_USUARIO, LOW);   // estado seguro por boot (strapping pin)
+  pinMode(PIN_LED_ALERTA, OUTPUT);
+  digitalWrite(PIN_LED_ALERTA, LOW);
+
+  // --- Reporte de causa de reset/wakeup (útil para la prueba de ext0) ---
+  imprimirCausaDeWakeup();
+
+  Serial.println();
+  Serial.println(F("================================================"));
+  Serial.println(F(" TEST PCB DORSAL AISLADO - Wearable pre-ictal"));
+  Serial.println(F("================================================"));
+
+  // --- Self-test de LEDs ---
+  Serial.println(F("[1/3] Self-test de LEDs (usuario GPIO15 / alerta GPIO21)..."));
+  selfTestLEDs();
+
+  // --- I2C ---
+  Serial.println(F("[2/3] Iniciando bus I2C HP (SDA=22 / SCL=23)..."));
+  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+  Wire.setClock(100000); // 100kHz, según recomendación de Sección 3 (margen de FPC)
+  escanearI2C();
+
+  // --- MPU-6050 ---
+  Serial.println(F("[3/3] Inicializando MPU-6050..."));
+  if (mpu.begin(MPU_ADDR, &Wire)) {
+    mpu_ok = true;
+    mpu.setAccelerometerRange(MPU6050_RANGE_16_G); // rango de diseño (Sección 5.3)
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+    Serial.println(F("  -> MPU-6050 OK (0x68) - Adafruit_MPU6050 inicializado."));
+
+    configurarInterrupcionMovimiento();
+    pinMode(PIN_MPU_INT, INPUT); // el módulo GY-521 suele traer pull-up propio en INT
+    Serial.println(F("  -> Interrupción de movimiento configurada. INT en GPIO2."));
+  } else {
+    mpu_ok = false;
+    Serial.println(F("  -> ERROR: no se detectó el MPU-6050 en 0x68."));
+    Serial.println(F("     Revisar soldadura I2C, alimentación 3.3V y pull-ups."));
+  }
+
+  mostrarMenu();
+}
+
+// ================================================================
+// LOOP: menú por Serial + monitoreo continuo opcional
+// ================================================================
+bool modoMonitoreoContinuo = false;
+uint32_t ultimaImpresion = 0;
+
+void loop() {
+  if (Serial.available()) {
+    char c = Serial.read();
+    procesarComando(c);
+  }
+
+  if (modoMonitoreoContinuo && mpu_ok && millis() - ultimaImpresion > 200) {
+    ultimaImpresion = millis();
+    monitorearIMUyAlerta();
+  }
+}
+
+// ================================================================
+// MENÚ DE COMANDOS
+// ================================================================
+void mostrarMenu() {
+  Serial.println();
+  Serial.println(F("--------------- MENU DE PRUEBAS ---------------"));
+  Serial.println(F(" l  -> Probar LED de usuario (GPIO15)"));
+  Serial.println(F(" a  -> Probar LED/transistor de alerta (GPIO21)"));
+  Serial.println(F(" i  -> Re-escanear bus I2C"));
+  Serial.println(F(" m  -> Iniciar/Detener monitoreo continuo IMU + alerta"));
+  Serial.println(F(" r  -> Leer una sola muestra del MPU-6050"));
+  Serial.println(F(" w  -> Probar deep sleep + wakeup por movimiento (ext0/GPIO2)"));
+  Serial.println(F(" ?  -> Mostrar este menú"));
+  Serial.println(F("-------------------------------------------------"));
+}
+
+void procesarComando(char c) {
+  switch (c) {
+    case 'l': case 'L':
+      Serial.println(F(">> Parpadeando LED usuario (GPIO15) x5"));
+      parpadear(PIN_LED_USUARIO, 5, 150);
+      break;
+
+    case 'a': case 'A':
+      Serial.println(F(">> Activando LED/transistor de alerta (GPIO21) x5"));
+      parpadear(PIN_LED_ALERTA, 5, 150);
+      break;
+
+    case 'i': case 'I':
+      escanearI2C();
+      break;
+
+    case 'm': case 'M':
+      modoMonitoreoContinuo = !modoMonitoreoContinuo;
+      Serial.print(F(">> Monitoreo continuo IMU+alerta: "));
+      Serial.println(modoMonitoreoContinuo ? F("ACTIVADO") : F("DETENIDO"));
+      if (!modoMonitoreoContinuo) digitalWrite(PIN_LED_ALERTA, LOW);
+      break;
+
+    case 'r': case 'R':
+      leerMuestraUnica();
+      break;
+
+    case 'w': case 'W':
+      probarDeepSleepWakeup();
+      break;
+
+    case '?':
+      mostrarMenu();
+      break;
+
+    case '\n': case '\r':
+      break; // ignorar
+
+    default:
+      Serial.println(F("Comando no reconocido. Presioná '?' para ver el menu."));
+      break;
+  }
+}
+
+// ================================================================
+// FUNCIONES DE PRUEBA
+// ================================================================
+
+void selfTestLEDs() {
+  parpadear(PIN_LED_USUARIO, 3, 120);
+  parpadear(PIN_LED_ALERTA, 3, 120);
+}
+
+void parpadear(uint8_t pin, uint8_t veces, uint16_t ms) {
+  for (uint8_t i = 0; i < veces; i++) {
+    digitalWrite(pin, HIGH);
+    delay(ms);
+    digitalWrite(pin, LOW);
+    delay(ms);
+  }
+}
+
+void escanearI2C() {
+  Serial.println(F("  Escaneando bus I2C..."));
+  uint8_t encontrados = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    uint8_t err = Wire.endTransmission();
+    if (err == 0) {
+      encontrados++;
+      Serial.print(F("  -> Dispositivo encontrado en 0x"));
+      if (addr < 16) Serial.print('0');
+      Serial.print(addr, HEX);
+      if (addr == 0x68) Serial.print(F("  (esperado: MPU-6050)"));
+      if (addr == 0x49) Serial.print(F("  (ADS1115 - modulo ventral, no deberia aparecer aislado)"));
+      if (addr == 0x48) Serial.print(F("  (MAX30205 - modulo ventral, no deberia aparecer aislado)"));
+      Serial.println();
+    }
+  }
+  if (encontrados == 0) {
+    Serial.println(F("  -> Ningun dispositivo I2C respondio. Revisar SDA/SCL, GND y 3.3V."));
+  } else {
+    Serial.print(F("  Total encontrados: "));
+    Serial.println(encontrados);
+    Serial.println(F("  (Con el modulo ventral desconectado, lo esperable es ver SOLO 0x68)"));
+  }
+}
+
+void leerMuestraUnica() {
+  if (!mpu_ok) {
+    Serial.println(F(">> MPU-6050 no disponible, no se puede leer."));
+    return;
+  }
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+  Serial.println(F(">> Muestra unica MPU-6050:"));
+  imprimirMuestra(a, g, temp);
+  Serial.print(F("   INT (GPIO2) estado actual: "));
+  Serial.println(digitalRead(PIN_MPU_INT));
+}
+
+void monitorearIMUyAlerta() {
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+  imprimirMuestra(a, g, temp);
+
+  // Magnitud de aceleracion menos 1g de gravedad, para detectar movimiento
+  float mag = sqrt(a.acceleration.x * a.acceleration.x +
+                    a.acceleration.y * a.acceleration.y +
+                    a.acceleration.z * a.acceleration.z) / 9.80665; // en g
+  float delta = fabs(mag - 1.0);
+
+  bool hayAlerta = (delta > UMBRAL_ALERTA_G) || (digitalRead(PIN_MPU_INT) == HIGH);
+  digitalWrite(PIN_LED_ALERTA, hayAlerta ? HIGH : LOW);
+
+  if (hayAlerta) {
+    Serial.println(F("   *** MOVIMIENTO POR ENCIMA DEL UMBRAL -> GPIO21 (alerta) ACTIVADO ***"));
+  }
+}
+
+void imprimirMuestra(sensors_event_t &a, sensors_event_t &g, sensors_event_t &temp) {
+  Serial.print(F("   Accel [m/s2] X:")); Serial.print(a.acceleration.x, 2);
+  Serial.print(F(" Y:")); Serial.print(a.acceleration.y, 2);
+  Serial.print(F(" Z:")); Serial.print(a.acceleration.z, 2);
+  Serial.print(F("  | Gyro [rad/s] X:")); Serial.print(g.gyro.x, 2);
+  Serial.print(F(" Y:")); Serial.print(g.gyro.y, 2);
+  Serial.print(F(" Z:")); Serial.print(g.gyro.z, 2);
+  Serial.print(F("  | Temp IMU [C]:")); Serial.println(temp.temperature, 1);
+}
+
+// ================================================================
+// PRUEBA DE DEEP SLEEP + WAKEUP POR MOVIMIENTO (ext1, GPIO2)
+// Replica la mecánica descripta en Sección 9 del contexto, sin
+// depender del ciclo SAMPLE/IDLE completo (eso requiere el resto
+// del sistema). Acá solo se valida el mecanismo de wakeup en si.
+// CORRECCION: el ESP32-C6 usa ext1_wakeup (mascara de pines), no
+// ext0_wakeup como en el ESP32 clasico. Ver nota dentro de la funcion.
+// ================================================================
+void probarDeepSleepWakeup() {
+  Serial.println();
+  Serial.println(F(">> PRUEBA DE DEEP SLEEP + EXT0 WAKEUP"));
+  Serial.println(F("   El equipo va a dormir en 3 segundos."));
+  Serial.println(F("   Movelo/golpealo suavemente para generar la interrupcion"));
+  Serial.println(F("   de movimiento del MPU-6050 (pin INT -> GPIO2) y despertarlo."));
+  Serial.println(F("   Timeout de seguridad: 15 s (wakeup por timer si no hay movimiento)."));
+  delay(3000);
+
+  digitalWrite(PIN_LED_USUARIO, LOW);
+  digitalWrite(PIN_LED_ALERTA, LOW);
+
+  // Asegurar que el INT quede habilitado antes de dormir
+  configurarInterrupcionMovimiento();
+
+  Serial.flush();
+
+  // NOTA IMPORTANTE: el ESP32-C6 (a diferencia del ESP32 clasico y S2/S3)
+  // NO soporta esp_sleep_enable_ext0_wakeup(). Solo tiene ext1_wakeup,
+  // que trabaja con una MASCARA de pines en vez de un pin unico.
+  // Esto corrige lo asumido originalmente en el documento de contexto
+  // (Seccion 9), que daba por sentado el uso de ext0 sin verificar
+  // contra el C6 especificamente.
+  uint64_t mascara = (1ULL << PIN_MPU_INT);
+  esp_sleep_enable_ext1_wakeup(mascara, ESP_EXT1_WAKEUP_ANY_HIGH); // RISING = movimiento
+  esp_sleep_enable_timer_wakeup(15000000ULL); // 15 s de respaldo, en microsegundos
+
+  esp_deep_sleep_start();
+  // ---- El firmware se reinicia desde arriba (setup()) al despertar ----
+  // La causa del wakeup se imprime al inicio de setup() via
+  // imprimirCausaDeWakeup().
+}
+
+void imprimirCausaDeWakeup() {
+  esp_sleep_wakeup_cause_t causa = esp_sleep_get_wakeup_cause();
+  Serial.println();
+  Serial.print(F("Causa de arranque/wakeup: "));
+  switch (causa) {
+    case ESP_SLEEP_WAKEUP_EXT1: {
+      Serial.print(F("EXT1 -> Movimiento detectado en GPIO"));
+      uint64_t mascaraWakeup = esp_sleep_get_ext1_wakeup_status();
+      for (int pin = 0; pin < 64; pin++) {
+        if (mascaraWakeup & (1ULL << pin)) Serial.print(pin);
+      }
+      Serial.println(F(" (MPU-6050 INT). OK, prueba exitosa."));
+      break;
+    }
+    case ESP_SLEEP_WAKEUP_TIMER:
+      Serial.println(F("TIMER -> Se cumplio el timeout de 15s sin movimiento detectado."));
+      Serial.println(F("         Si esperabas que despertara por movimiento, revisar:"));
+      Serial.println(F("         cableado de INT a GPIO2, registros MOT_THR/MOT_DUR,"));
+      Serial.println(F("         y que el INT_PIN_CFG este en modo latch/clear correcto."));
+      break;
+    default:
+      Serial.println(F("POWER-ON / RESET NORMAL (no fue un wakeup de deep sleep)."));
+      break;
+  }
+}

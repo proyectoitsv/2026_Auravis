@@ -1,0 +1,278 @@
+================================================================================
+MIGRACIÓN DE ESQUEMÁTICO EASYEDA — ESP32-C3 SuperMini → XIAO ESP32-C6
+Wearable Detección Pre-Ictal · Grupo N°6
+================================================================================
+Fecha de generación: 2026-07-01
+Propósito: este documento resume TODOS los cambios necesarios para llevar el
+esquemático EasyEDA actual (basado en ESP32-C3 SuperMini, PCB única, señales
+analógicas directas al MCU) al estado que exige el documento de contexto
+"contexto_proyecto_wearable_v5.txt" (MCU XIAO ESP32-C6, doble PCB ventral/
+dorsal, cable FPC 100% digital, ADS1115 dual-canal).
+
+ESTADO DE ORIGEN (lo que hay hoy en EasyEDA, según registro_avance_pcb_easyeda.txt):
+  - PCB ÚNICA con: ESP32-C3 SuperMini, TP4056, AP2112K-3.3, AD8232, Grove GSR,
+    GY-521/MPU-6050, MicroSD, LED+R2, headers de alerta U8/U9/U10/U11,
+    transistor Q1 (2N2222), SW1/SW2 (botones debug en GPIO2/GPIO3).
+  - AD8232 OUTPUT → GPIO0 (ADC1 ch0) directo, analógico.
+  - Grove GSR SIG → GPIO1 (ADC1 ch1) directo, analógico.
+  - Sin MAX30205 (se descartó explícitamente en la última decisión registrada).
+  - Sin ADS1115.
+  - Todo en un solo esquemático/PCB.
+
+ESTADO DESTINO (según contexto_proyecto_wearable_v5.txt, decisiones CERRADAS):
+  - MCU: XIAO ESP32-C6 (Seeed, SKU 113991254). Cargador LiPo + regulador
+    SGM6029 3.3V INTEGRADOS en el módulo.
+  - DOS PCBs: módulo VENTRAL (sensores de piel) y módulo DORSAL (MCU,
+    IMU, microSD, batería), unidas por cable FPC de 8 pines, 100% digital.
+  - AD8232 y Grove GSR se digitalizan en el módulo VENTRAL con un ADS1115
+    dual-canal antes de cruzar el cable. NINGUNA señal analógica fisiológica
+    cruza el FPC.
+  - MAX30205 REINCORPORADO (revierte la decisión anterior de eliminarlo).
+  - Batería: 450 mAh, conector JST 1.25mm 2P (nativo XIAO C6).
+
+================================================================================
+1. COMPONENTES A ELIMINAR DEL ESQUEMÁTICO ACTUAL
+================================================================================
+
+  [ ] U1  TP4056                → XIAO C6 trae cargador LiPo integrado
+  [ ] U2  AP2112K-3.3            → XIAO C6 trae regulador SGM6029 integrado
+  [ ] C1  10µF (entrada AP2112K) → filtro de un regulador que ya no existe
+  [ ] C2  10µF (salida AP2112K)  → ídem
+  [ ] R1  1.5kΩ (PROG TP4056)    → era del cargador eliminado
+  [ ] Footprint PWRM-TH_TP4056   → ya no aplica
+  [ ] SW1 (Debug Button 1, antes en GPIO2) → GPIO2 ahora es MPU-6050 INT
+      (ext0 wakeup). Ver sección 6 "PUNTOS ABIERTOS" antes de decidir si se
+      reubica o se elimina definitivamente.
+  [ ] SW2 (Debug Button 2, antes en GPIO3) → GPIO3 no existe como tal en el
+      mapa de pines v5 del XIAO C6 (ver mapa de pines, sección 3). Mismo
+      tratamiento que SW1.
+
+NOTA: C3 (100nF desacople MCU) y C4 (100nF desacople MicroSD) NO se eliminan,
+se conservan como capacitores de bypass, pero ahora van en los pines VCC/GND
+del XIAO C6 y del módulo MicroSD respectivamente (ver regla de layout v5
+sección 12, punto 4).
+
+================================================================================
+2. COMPONENTES A AGREGAR
+================================================================================
+
+  [ ] XIAO ESP32-C6 (reemplaza a U3 ESP32-C3 SuperMini)
+      - Footprint: pads castellados, 21×17.8mm. Buscar footprint específico
+        "Seeed XIAO ESP32C6" en EasyEDA/LCSC. Verificar pinout físico
+        contra: github.com/Seeed-Studio/XIAO_Series
+      - ADVERTENCIA: NO confundir con "ESP32-C6 SuperMini" (clon genérico
+        con LED RGB WS2812 que consume 5-20mA en vez de 14.3µA). Verificar
+        SKU 113991254 o vendedor oficial Seeed.
+
+  [ ] ADS1115 — módulo VENTRAL
+      - Dirección I2C: 0x49 (pin ADDR → VDD). CRÍTICO: no dejar en 0x48
+        por defecto, colisiona con MAX30205.
+      - AIN0(+)/AIN1(-): diferencial, señal ECG desde AD8232.
+      - AIN2: single-ended, señal EDA desde Grove GSR.
+      - AIN3: libre, reservado a expansión futura.
+      - Pin ALERT/RDY: usar para lectura interrupt-driven (flanco FALLING,
+        LATCH activo). No usar polling.
+
+  [ ] MAX30205 — módulo VENTRAL (reincorporado, revierte decisión previa)
+      - Dirección I2C: 0x48 (default, A0=A1=A2=GND).
+      - Isla PCB térmicamente aislada + ventana de silicona hacia la piel.
+      - Pin OS/INT: libre (no hay GPIO disponible para interrupción,
+        lectura por polling).
+
+  [ ] MOSFET P-channel — módulo VENTRAL
+      - Power-gate del Grove GSR, controlado por GPIO del módulo dorsal
+        a través del FPC (o localmente si se decide un GPIO en el propio
+        ventral — VERIFICAR, el documento v5 no especifica qué GPIO
+        controla este MOSFET, ver sección 6 puntos abiertos).
+
+  [ ] Conector FPC ZIF 8 pines × 2 (uno en cada PCB)
+      - Ej. Hirose FH12-8S-0.5SH o equivalente, flip-top.
+      - Ver asignación de pines en sección 4.
+
+  [ ] Filtros RC en entradas analógicas hacia el ADS1115 (módulo ventral):
+      - Línea ECG: 100Ω + 10nF
+      - Línea EDA: 100Ω + 100nF
+
+  [ ] Resistencias pull-up I2C recalculadas: 2.2kΩ en vez de 4.7kΩ estándar
+      (compensa capacitancia del cable FPC largo). Verificar si el GY-521
+      sigue trayendo sus propias pull-ups de 4.7kΩ internas — si están
+      soldadas de fábrica y no se pueden retirar, evaluar impacto de tener
+      2.2kΩ del PCB en paralelo con 4.7kΩ del módulo (resultante ~1.5kΩ,
+      revisar que no exceda corriente de sink de los dispositivos I2C).
+
+================================================================================
+3. MAPA DE PINES — ESP32-C3 (VIEJO) → XIAO ESP32-C6 (NUEVO)
+================================================================================
+
+  Función                  | ESP32-C3 (viejo)        | XIAO C6 (nuevo)
+  --------------------------|--------------------------|---------------------
+  ECG_OUT (analógico)      | GPIO0 (ADC1 ch0)        | ELIMINADO — ahora vía
+                            |                          | ADS1115 AIN0/AIN1 + I2C
+  EDA_SIG (analógico)      | GPIO1 (ADC1 ch1)        | ELIMINADO — ahora vía
+                            |                          | ADS1115 AIN2 + I2C
+  LO+ (AD8232 lead-off)    | no conectado (se quitó) | GPIO0 (digital IN, RTC)
+  LO- (AD8232 lead-off)    | no conectado (se quitó) | GPIO1 (digital IN, RTC)
+  MPU-6050 INT (wakeup)    | no conectado            | GPIO2 (RTC GPIO, ext0
+                            |                          | wakeup, flanco RISING)
+  I2C SDA                  | GPIO8                    | GPIO22
+  I2C SCL                  | GPIO9                    | GPIO23
+  SPI SCK (microSD)        | GPIO4                    | GPIO19
+  SPI MISO (microSD)       | GPIO5                    | GPIO20 (pull-up 10kΩ
+                            |                          | recomendado)
+  SPI MOSI (microSD)       | GPIO6                    | GPIO18
+  SPI CS (microSD)         | GPIO7                    | GPIO21 ⚠️ VER CONFLICTO
+                            |                          | sección 6
+  ALERTA (LED+buzzer)      | GPIO10                   | GPIO21 ⚠️ MISMO CONFLICTO
+  LED integrado del módulo | GPIO8 (compartía con SDA)| GPIO15 (independiente
+                            |                          | de I2C, pero es
+                            |                          | strapping pin)
+  UART TX / RX (debug)     | no existía               | GPIO16 / GPIO17
+                            |                          | (libres en producción)
+  Debug buttons SW1/SW2    | GPIO2 / GPIO3            | SIN PIN ASIGNADO en v5
+                            |                          | — decidir reubicación
+  LP I2C (solo v2)         | no existía               | GPIO6 (SDA) / GPIO7
+                            |                          | (SCL) — pads inferiores
+
+STRAPPING PINS:
+  - ESP32-C3 (viejo): GPIO4, GPIO5, GPIO6, GPIO7, GPIO8, GPIO9.
+  - XIAO C6 (nuevo): GPIO4, GPIO5, GPIO8, GPIO9 (no expuestos en el header
+    principal del XIAO C6) y GPIO15 (SÍ expuesto, es el LED de usuario).
+    Acción de firmware obligatoria: pinMode(15, OUTPUT); digitalWrite(15,
+    LOW); en setup(), y mantener GPIO15 held LOW durante deep sleep.
+
+================================================================================
+4. CABLE FPC 8 PINES — ASIGNACIÓN (CONFIRMADA EN v5, 100% DIGITAL)
+================================================================================
+
+  Pin 1 — VCC 3.3V
+  Pin 2 — GND
+  Pin 3 — SDA (bus HP I2C: ADS1115 0x49, MAX30205 0x48)
+  Pin 4 — SCL (bus HP I2C)
+  Pin 5 — GND (separador)
+  Pin 6 — LO+ (digital, AD8232 → GPIO0 del XIAO C6)
+  Pin 7 — LO- (digital, AD8232 → GPIO1 del XIAO C6)
+  Pin 8 — RLD (referencia analógica AD8232 → electrodo RL, montado en el
+          módulo dorsal)
+
+  IMPORTANTE: pin 8 (RLD) es la ÚNICA señal de naturaleza analógica que
+  cruza el cable, pero es una referencia de driven-right-leg hacia un
+  electrodo físico, no una señal de medición — no requiere blindaje
+  adicional según v5, pero sí mantenerla corta.
+
+  Conectores: ZIF flip-top en ambas placas, no accesibles por el usuario
+  final (quedan dentro de cada enclosure).
+
+================================================================================
+5. DISTRIBUCIÓN DE COMPONENTES POR PCB (NUEVA)
+================================================================================
+
+MÓDULO VENTRAL (cara interna de la muñeca — nueva PCB, antes no separada):
+  - AD8232 (chip/módulo ECG)
+  - ADS1115 (NUEVO)
+  - MAX30205 (REINCORPORADO)
+  - Grove GSR + MOSFET P-channel de power-gate (MOSFET es NUEVO)
+  - Filtros RC de entrada ADC (NUEVOS)
+  - Pull-ups I2C 2.2kΩ
+  - Conector FPC ZIF 8 pines
+  - Electrodos RA/LA (ECG) y electrodos EDA (acero inoxidable 316L)
+
+MÓDULO DORSAL (cara externa de la muñeca — PCB principal actualizada):
+  - XIAO ESP32-C6 (reemplaza ESP32-C3 SuperMini)
+  - GY-521 / MPU-6050 (se mantiene, cambia de bus I2C: ver sección 3)
+  - MicroSD (se mantiene, cambia de pines SPI: ver sección 3)
+  - LED1 + R2 (alerta visual, se mantiene, cambia de GPIO)
+  - Q1 (2N2222) + R3 + U8/U9 (headers de alerta expansibles, se mantienen,
+    cambia el GPIO fuente)
+  - U10/U11 (headers de test +3V3/GND, se mantienen, no dependen del MCU)
+  - Batería LiPo 450mAh + conector JST 1.25mm 2P (CAMBIA de JST-PH 2.0mm)
+  - Conector FPC ZIF 8 pines
+  - Electrodo RL (referencia AD8232, vía pin 8 del FPC)
+
+================================================================================
+6. PUNTOS ABIERTOS — RESOLVER ANTES DE CONTINUAR EN EASYEDA
+================================================================================
+
+  [!] CONFLICTO GPIO21: el documento v5 asigna GPIO21 simultáneamente a
+      "Alerta LED/buzzer" (tabla de pines, sección 6 del contexto) y a
+      "SPI CS del microSD" (código de ejemplo: SPI.begin(19, 20, 18, 21)).
+      Un mismo pin no puede ser salida digital de alerta y chip-select SPI
+      del microSD a la vez. HAY QUE ELEGIR un GPIO libre distinto para uno
+      de los dos antes de rutear el PCB dorsal. Candidatos a evaluar:
+      GPIO16/GPIO17 (si no se usan para debug UART), o revisar si el XIAO
+      C6 expone más pines utilizables en pads inferiores.
+
+  [!] SW1/SW2 (botones de debug) sin GPIO asignado en v5. Decidir:
+        a) Eliminarlos definitivamente del diseño.
+        b) Reasignarlos a GPIO16/GPIO17 (se pierde debug por UART serie).
+        c) Buscar otro GPIO libre en pads inferiores del XIAO C6.
+
+  [!] GPIO de control del MOSFET P-channel (power-gate del Grove GSR): el
+      documento v5 menciona el mecanismo (sección 2.2 y 8.2) pero NO
+      especifica qué GPIO del MCU lo controla, ni si el control llega desde
+      el módulo dorsal a través de un pin adicional del FPC (que ya tiene
+      sus 8 pines ocupados) o si se resuelve localmente en el módulo
+      ventral. Esto es una definición pendiente y crítica: con el FPC de
+      8 pines ya completo (VCC, GND×2, SDA, SCL, LO+, LO-, RLD), NO HAY
+      PIN LIBRE para llevar una señal de control de power-gate al módulo
+      ventral. Alternativas a evaluar con el usuario:
+        a) Agregar un 9° pin al FPC (cambia el conector y el cable).
+        b) Controlar el power-gate del GSR mediante un comando I2C (por
+           ejemplo, usando un GPIO expander I2C economico, o aprovechando
+           algún pin de control disponible en el propio ADS1115 si
+           existiera — el ADS1115 no tiene GPIO auxiliar, así que
+           probablemente se necesite un expansor I2C dedicado, ej.
+           PCF8574, en el módulo ventral).
+        c) Prescindir del power-gate por GPIO remoto y usar un circuito de
+           enclavado local en el ventral disparado por otra condición.
+      Esto afecta directamente el presupuesto energético (sección 10 del
+      contexto v5 asume 0mA de Grove GSR en IDLE gracias al power-gate).
+
+  [!] Confirmar si el GY-521 sigue siendo el módulo elegido para el
+      MPU-6050 (con sus pull-ups I2C de 4.7kΩ soldadas) o si en la migración
+      a XIAO C6 conviene pasar al chip MPU-6050 desnudo para poder usar
+      las pull-ups de 2.2kΩ recomendadas para el bus con FPC sin
+      duplicidad. Revisar impacto de tener 4.7kΩ (GY-521) en paralelo con
+      2.2kΩ (PCB) → resultante ~1.5kΩ, verificar specs de sink current de
+      ADS1115/MAX30205/MPU-6050.
+
+  [!] Footprint específico del XIAO ESP32-C6 en EasyEDA: verificar si existe
+      en la librería (LCSC/EasyEDA) o si hay que crear uno propio, igual que
+      se hizo con el módulo MicroSD (42×24mm, custom). Medir el módulo
+      físico con calibrador antes de comprar el lote de PCB.
+
+  [!] Corriente de carga del cargador integrado del XIAO C6 sigue
+      PENDIENTE de confirmar en el esquemático oficial de Seeed (ver
+      contexto v5 sección 14, ítem [PENDIENTE]). Si es menor a 100mA,
+      reconsiderar la capacidad de batería de 450mAh.
+
+================================================================================
+7. CHECKLIST DE PASOS EN EASYEDA (orden sugerido)
+================================================================================
+
+  [ ] 1. Duplicar el proyecto actual como respaldo antes de modificar nada.
+  [ ] 2. Crear DOS hojas de esquemático nuevas: "PCB_Ventral" y "PCB_Dorsal"
+         (o dos proyectos separados, según preferencia de organización).
+  [ ] 3. Eliminar U1 (TP4056), U2 (AP2112K), C1, C2, R1 del esquemático.
+  [ ] 4. Reemplazar U3 (ESP32-C3 SuperMini) por el símbolo XIAO ESP32-C6.
+  [ ] 5. Resolver el conflicto de GPIO21 (sección 6) ANTES de re-cablear
+         SPI y ALERTA.
+  [ ] 6. Mover AD8232 y Grove GSR a la hoja "PCB_Ventral".
+  [ ] 7. Agregar ADS1115 en "PCB_Ventral", conectarlo a AD8232 (AIN0/AIN1
+         diferencial) y Grove GSR (AIN2 single-ended). Fijar ADDR→VDD (0x49).
+  [ ] 8. Agregar MAX30205 en "PCB_Ventral", conectar a bus I2C, A0/A1/A2→GND.
+  [ ] 9. Agregar MOSFET P-channel para Grove GSR (pendiente definir GPIO de
+         control, ver sección 6).
+  [ ] 10. Agregar conector FPC 8 pines en cada hoja, cablear según sección 4.
+  [ ] 11. En "PCB_Dorsal": mover GY-521/MPU-6050, MicroSD, LED+R2, Q1+R3,
+          U8/U9/U10/U11 y recablear todos los net labels al nuevo mapa de
+          pines del XIAO C6 (sección 3).
+  [ ] 12. Conectar INT del GY-521 a GPIO2 del XIAO C6 (nuevo, no existía).
+  [ ] 13. Cambiar footprint de conector de batería a JST 1.25mm 2P.
+  [ ] 14. Decidir destino de SW1/SW2 (sección 6) y actualizar esquemático.
+  [ ] 15. Ejecutar DRC en ambas placas por separado.
+  [ ] 16. Revisar BOM actualizada (agrega ADS1115, MAX30205, MOSFET, FPC×2;
+          quita TP4056, AP2112K, R1, C1, C2).
+
+================================================================================
+FIN DEL DOCUMENTO
+================================================================================
