@@ -1,0 +1,935 @@
+================================================================
+DOCUMENTO DE CONTEXTO — PROYECTO DE TESIS
+Wearable de detección pre-ictal para epilepsia refractaria
+Tecnicatura en Electrónica
+Revisión: 5.3 — Enclosure único, sensores propios (AD8232 desnudo
++ TIA de EDA con MCP6002), sin canal de temperatura, guarding
+descartado por longitud de cable
+================================================================
+
+PROPÓSITO DE ESTE DOCUMENTO
+----------------------------
+Registro de decisiones técnicas, componentes, criterios y debates
+del proyecto, pensado para iniciar nuevas conversaciones con Claude
+sin perder el hilo. Toda decisión puede revisarse, pero se espera
+que el asistente parta de este contexto y no repita debates cerrados.
+
+CONVENCIÓN DE ESTADOS USADA EN ESTE DOCUMENTO
+  [CONFIRMADO]   decisión tomada por el equipo
+  [DESCARTADO]   evaluado y dejado afuera, con su justificación
+  [PROPUESTO]    surgió del análisis; falta confirmación del equipo
+  [PENDIENTE]    requiere dato, medición o decisión
+  [SIN VERIFICAR] afirmación que no se contrastó con la fuente
+
+CAMBIOS RESPECTO A LA REVISIÓN 5.2
+-----------------------------------
+[CONFIRMADO] Se elimina el enclosure ventral: un único enclosure
+  (placa principal). Los electrodos siguen en la cara ventral pero
+  sostenidos por la correa. Desaparece la interconexión entre
+  enclosures (FPC, JST XH, conteo de conductores, restricciones de
+  capacitancia del bus I2C por cable).
+[CONFIRMADO] Motivo: el enclosure secundario terminaba siendo más
+  grande que el principal. Al diseñar sensores propios (chips
+  desnudos en vez de módulos comerciales) el volumen deja de ser
+  el cuello de botella.
+[CONFIRMADO] AD8232: se abandona el módulo SparkFun y se pasa al
+  chip desnudo AD8232ACPZ (LFCSP 4x4 mm, 20 pines, pitch 0.5 mm),
+  ensamblado en SMT (aire caliente + pasta). Topología del datasheet
+  Fig. 64 ("Heart Rate Measured at the Hands").
+[CONFIRMADO] EDA: se abandona el Grove GSR. Circuito propio tipo
+  TIA con MCP6002 (Sección 5.4), en la placa principal.
+[DESCARTADO] Canal de temperatura cutánea (MAX30205 y reemplazos)
+  para v1 — ver Sección 2.4. [PENDIENTE] confirmación explícita.
+[DESCARTADO] Guarding activo (blindaje conducido) — ver Sección 3.3.
+  Descartado por cálculo (cable RG178 de pocos cm); [PENDIENTE]
+  confirmar en banco.
+[CONFIRMADO] Cable electrodo→placa: RG178 (50 ohm, AWG30), 4 cables
+  de ~5-6 cm (el recorrido real alrededor de la muñeca puede ser
+  mayor, ver Sección 3.2).
+[CONFIRMADO] La correa se diseña para aliviar el esfuerzo mecánico
+  sobre todos los conectores y cables.
+[CORRECCIÓN] Sección 2.2 de v5.2: el Grove GSR NO es un divisor
+  pasivo con resistencia serie de 10 kohm. Es un circuito activo
+  (LM324 + potenciómetro de 200 kohm + resistencia de 1 Mohm +
+  capacitores de 100 nF). La fórmula del fabricante implica una
+  referencia de 20 kohm. Queda solo como antecedente.
+[CORRECCIÓN] TL074 y LM324 no son aptos para esta aplicación con
+  alimentación simple de 3.3 V (ver Sección 5.4 y Sección 14).
+[CORRECCIÓN] Justificación del ADS1115: ya no es "cruzar el cable
+  en digital", sino resolución y precisión de muestreo (Sección 5.2).
+[CORRECCIÓN] Presupuesto energético recalculado (Sección 10).
+[CORRECCIÓN] Mapa de pines: se detectaron GPIO sin asignar
+  (CS de la microSD, gate del BS250, ALERT/RDY) — Sección 6.
+
+
+================================================================
+1. OBJETIVO Y ALCANCE
+================================================================
+
+Diseñar y construir un wearable de muñeca capaz de detectar de forma
+temprana y gradual un inminente episodio ictal en pacientes con
+epilepsia refractaria, para mejorar su calidad de vida y autonomía.
+
+Es una tesis de fin de curso de la Tecnicatura en Electrónica: debe
+ser funcional pero abordable.
+
+RESTRICCIONES DE DISEÑO VIGENTES:
+- Un único enclosure + correa que sostiene los electrodos ventrales
+- Form factor de pulsera en muñeca no dominante
+- Firmware en C/C++ con ESP-IDF (VS Code), según el estado actual
+  del proyecto. La restricción "Arduino IDE" de revisiones previas
+  ya no aplica.
+- Componentes disponibles en Argentina (MercadoLibre) o importación
+  (DigiKey/Mouser para lo que no se consiga localmente; consolidar
+  pedidos para diluir el costo fijo de envío)
+- Batería LiPo recargable, autonomía objetivo 24 h
+- Firmware v1 sin BLE/WiFi activo
+- Montaje: through-hole por defecto; SMD selectivo para chips cuyo
+  encapsulado lo exige (AD8232ACPZ en LFCSP, y los que se definan).
+  El MPU-6050 no se rediseña (módulo GY-521).
+- Ensamblado SMD con estación de aire caliente y pasta (no cautín).
+  Para el AD8232ACPZ se recomienda evaluar el ensamblado SMT de
+  JLCPCB con el chip consignado (componente único, pitch 0.5 mm,
+  pad térmico oculto, sin repuesto si falla el primer intento).
+  [PENDIENTE] verificar en el flujo de EasyEDA/JLCPCB si aceptan
+  partes consignadas.
+
+ALCANCE CLÍNICO (limitación declarada, ampliada en esta revisión)
+  El sistema está pensado para crisis generalizadas tónico-clónicas
+  (GTCS), donde IMU, EDA y HRV dan su respuesta más fuerte a la vez.
+  Detalle por tipo de crisis en la Sección 11.
+
+
+================================================================
+2. PARÁMETROS FISIOLÓGICOS MEDIDOS
+================================================================
+
+Canales activos en v1: ECG/HRV, EDA e IMU. La temperatura queda
+fuera de v1 (Sección 2.4).
+
+2.1 HRV / FRECUENCIA CARDÍACA (parámetro pre-ictal primario)
+-------------------------------------------------------------
+Sensor: AD8232ACPZ (chip desnudo) en topología de la Fig. 64 del
+datasheet (Rev. A, p. 24).
+Fundamento: el sistema autónomo modifica el tono vagal antes del
+inicio ictal: cae la HRV, se acorta el intervalo R-R, aparece
+taquicardia sinusal.
+Evidencia:
+- Pinto et al., Scientific Reports 2021: cambios pre-ictales en 41%
+  de crisis, 90% de pacientes, ventana de hasta 40 minutos.
+  https://www.nature.com/articles/s41598-021-85350-y
+- Jeppesen et al., Seizure 2018: metaanálisis de 30 estudios, 1110
+  participantes, 2957 crisis. Incremento pre-ictal en 36/100.
+  https://www.sciencedirect.com/science/article/pii/S1059131117307343
+DECISIÓN CRÍTICA (sin cambios): se descartó el PPG (MAX30102) por
+artefactos de movimiento (55% de crisis no detectadas en pacientes
+refractarios); el ECG eléctrico duplicó la sensibilidad.
+
+POR QUÉ LA FIG. 64 Y NO LA CONFIGURACIÓN DEL MÓDULO SPARKFUN
+  El módulo SparkFun (config. "Cardiac Monitor", HP 0.5 Hz / LP 40 Hz)
+  no expone los nodos internos (HPSENSE, HPDRIVE, IAOUT, OPAMP,
+  REFIN/REFOUT, RLDFB): solo GND, 3.3V, OUTPUT, LO-, LO+, SDN y los
+  pads RA/LA/RL. No es posible cambiar filtros, protección de
+  entrada ni red de referencia sin el chip desnudo. La Fig. 64 está
+  diseñada por Analog Devices para el escenario "electrodos en las
+  manos": cable largo, alta susceptibilidad a modo común y a
+  artefactos de movimiento del brazo.
+
+COMPARACIÓN
+  Parámetro          Módulo SparkFun        Fig. 64
+  Pasa-altos         2 polos, 0.5 Hz        2 polos, ~7 Hz
+  Pasa-bajos         3 polos, 40 Hz         2 polos, ~24 Hz
+  Electrodo RL       Sí                     Sí
+  Protección entrada No documentada         2 x 180 kohm en +IN/-IN
+  Banda resultante   ~0.5-40 Hz             ~7-24 Hz (energía QRS)
+  IMPLICANCIA: se pierde morfología (ondas P y T, segmento ST). El
+  proyecto solo necesita el instante del pico R (RMSSD), por lo que
+  es aceptable, pero debe declararse en la tesis como decisión de
+  diseño, no como cambio de valores. El HPF de 7 Hz introduce más
+  retardo de grupo cerca del pico R: si es constante latido a latido
+  los R-R relativos se preservan, pero [PENDIENTE] verificarlo por
+  simulación o banco.
+  Limitación reconocida: un reporte de usuario del circuito (foro
+  EngineerZone) indica que en reposo funciona bien, pero el
+  artefacto de movimiento persiste al correr. Se compensa con el
+  MPU-6050 como árbitro, no se elimina.
+
+2.2 ACTIVIDAD ELECTRODÉRMICA / EDA (complementario)
+----------------------------------------------------
+Sensor: circuito propio TIA con MCP6002 (Sección 5.4). Reemplaza al
+Grove GSR y a las notas sobre él.
+Evidencia:
+- Geertsema et al., Epilepsy & Behavior 2022: metaanálisis 19
+  estudios, 82/100 crisis con respuesta EDA. Las tónico-clónicas
+  producen las respuestas más pronunciadas.
+  https://www.epilepsybehavior.com/article/S1525-5050(22)00313-4/fulltext
+- Poh et al., Epilepsy & Behavior 2010: la muñeca es alternativa
+  viable a la palma para EDA.
+  https://www.researchgate.net/publication/49626957
+- Un estudio con muñequera real (Scientific Reports, 66 pacientes,
+  161 crisis) reportó que solo la entropía de la EDA mostró alguna
+  diferencia pre-ictal, en un subconjunto de pacientes.
+  [SIN VERIFICAR] autores y año exactos: citar solo tras verlos.
+RANGO DE RESISTENCIA DE MUÑECA (advertencia de sustento)
+  El rango 500 kohm-10 Mohm usado hasta v5.2 NO está bien sostenido.
+  Fuentes revisadas: una patente de wearable de muñeca reporta
+  basal de 100 kohm a ~10 Mohm; otra, de EDA por AC en muñeca, sugiere
+  ~20 kohm a 20 Mohm; la referencia clásica (Venables y Christie,
+  1980) da "decenas de kohm/cm2 a 5 Mohm/cm2" sin ser específica de
+  muñeca. Ninguna es una medición controlada de cara ventral de
+  muñeca con electrodo seco. El extremo bajo es el clínicamente
+  relevante (alta activación simpática).
+  DECISIÓN DE DISEÑO: dimensionar para 200 kohm-10 Mohm (piso
+  ampliado). [PENDIENTE] medir en la propia muñeca con multímetro.
+
+2.3 MOVIMIENTO / IMU (árbitro del sistema)
+------------------------------------------
+Sensor: MPU-6050 (GY-521), sin cambios. Confirma el episodio motor
+y descarta falsas alarmas por ejercicio.
+Pin INT → GPIO2 (wakeup ext0 desde deep sleep).
+Estado documentado del proyecto: constantes de calibración del
+MPU-6050 establecidas (offsets de registros por hardware + corrección
+de software de 22 LSB en el eje GY). Los registros del MPU-6050
+persisten entre resets del MCU: reescribir los offsets en cada boot.
+Evidencia: Beniczky et al., Epilepsia 2013: 89.7% de sensibilidad en
+crisis tónico-clónicas generalizadas, 0.2 falsas alarmas/día.
+https://onlinelibrary.wiley.com/doi/abs/10.1111/epi.12120
+Registros correctos de accel low-power (MPU-6050, no MPU-6500):
+  PWR_MGMT_1 (0x6B)=0x20, PWR_MGMT_2 (0x6C)=0xC7, MOT_THR (0x1F)=0x20,
+  MOT_DUR (0x20)=0x01, INT_ENABLE (0x38)=0x40, INT_PIN_CFG (0x37)=0x10
+  Los registros 0x1D y 0x1E NO existen en el MPU-6050. No usar DMP.
+
+2.4 TEMPERATURA CUTÁNEA — [DESCARTADA PARA v1]
+----------------------------------------------
+Se evaluó y se propone dejarla fuera de v1. Razones:
+1) La fuente citada en v5.2 (Seyal et al., Clinical Neurophysiology
+   Practice 2025) mide temperatura del CANAL AUDITIVO (proxy de
+   temperatura cerebral), no de piel de muñeca. Mecanismo distinto
+   (aumento de flujo sanguíneo cerebral → aumento de temperatura) y
+   dirección opuesta a la vasoconstricción periférica que el proyecto
+   asumía (caída). Estudio exploratorio: 25 crisis, 12 pacientes;
+   efecto de +0.31 a +0.37 °C, comparable a la exactitud de los
+   sensores disponibles localmente.
+2) El único estudio hallado con datos de muñequera (66 pacientes, 161
+   crisis) no encontró diferencias significativas de media ni
+   varianza de temperatura entre período interictal y preictal.
+3) Costo: ningún reemplazo del MAX30205 (TMP117, Si7051, MCP9808)
+   estaba disponible en MercadoLibre; el envío dedicado desde China
+   costaría ~US$30-40 sin otro componente con quien diluir el costo.
+   Si7051 además está descontinuado (last buy sept. 2024).
+4) El sensor de temperatura interno del MPU-6050 NO sirve como
+   sustituto: mide el die del chip (autocalentamiento, componentes
+   vecinos, ambiente), sin contacto con la piel.
+Alternativas evaluadas por si se retoma: DS18B20 (1-Wire, ±0.5 °C,
+TO-92, muy disponible; requiere un GPIO propio y pull-up de 4.7
+kohm) y MLX90614 (I2C, infrarrojo sin contacto; requiere hueco de
+aire y validar distancia de trabajo, no es reemplazo directo).
+Nota: la exactitud absoluta importa menos que la repetibilidad si el
+uso es relativo a la línea de base del paciente; el problema de
+fondo es la falta de evidencia de señal en muñeca.
+Consecuencia: se eliminan la isla térmica, la ventana de silicona,
+el CJMCU-MAX30205 y la dirección I2C 0x48 ocupada por él.
+Redacción sugerida para la tesis: decisión basada en revisión
+crítica de evidencia, no "no se pudo conseguir".
+
+2.5 ESPECIFICACIÓN DE ELECTRODOS SECOS (ECG Y EDA)
+---------------------------------------------------
+MATERIAL: acero inoxidable AISI 316 (no 316L), chapa de 0.5 mm.
+  Motivo: 316L no es accesible en chapa a precio viable. Riesgo:
+  sensibilización por calor de soldadura y picadura por sudor
+  (cloruros). Mitigación obligatoria: flux específico para inox
+  (base ácido fosfórico, no resina ni cloruro de zinc sin limpieza),
+  limpieza con alcohol isopropílico y pasivado con ácido cítrico de
+  la zona soldada. Punto de soldadura en la cara posterior del disco.
+GEOMETRÍA
+  ECG (RA, LA): Ø16 mm (2.01 cm2), 25 mm entre centros, orientación
+    longitudinal (eje codo-mano). Respaldo: Escalona et al. 2017
+    (SNR 3.39 dB longitudinal vs 1.70 dB transversal, N=11; +1.69 dB,
+    ~48% en potencia lineal, no "duplica").
+  EDA (E1, E2): Ø11 mm (0.95 cm2), 28 mm entre centros, orientación
+    transversal al eje ECG (criterio de EMC, no hallazgo clínico).
+    Área: umbral de 140 glándulas (Haddad et al. 2017, solo abstract
+    verificado) con densidad de antebrazo (140-155/cm2, aproximación;
+    no existe cifra para cara ventral de muñeca). Haddad reporta que
+    0.15 cm2 en geometría serpentina alcanzó el umbral.
+  RL: Ø18-20 mm (diámetro final [PENDIENTE]).
+  Disposición: en cruz, envolvente ~41 x 39 mm (solo electrodos).
+CONTACTO EN PIEL SECA Y CON VELLO
+  6-8 perforaciones de 2-3 mm (evaporación de sudor y paso del vello)
+  y 4-6 pestañas periféricas de ~2 mm dobladas 0.2-0.4 mm. Bordes
+  redondeados. Se descartan diseños tipo peine de EEG y microagujas.
+CAMBIO EN ESTA REVISIÓN: la presión de contacto ya no la da el boss
+  de un enclosure ventral (0.5-1 mm, 12-18 mmHg) sino la correa.
+  [PENDIENTE] definir respaldo compliante y soporte de los discos.
+NOTA DE IMPEDANCIA: el AD8232 tiene ~10 Mohm de entrada. Con Zcontacto
+  de 0.5-1 Mohm la atenuación es 5-10%; con 5-10 Mohm, 30-50%. Las
+  resistencias de protección de 180 kohm se suman en serie:
+  [PENDIENTE] rehacer el cálculo con Zcontacto + 180 kohm.
+UBICACIÓN DE RL (ver Sección 3.4 y 14): tensión abierta.
+PENDIENTE: texto completo de Haddad et al. 2017 (paywall IEEE),
+Hannula y Heikkinen 2006, Anusha et al. 2018 (electrodos de acero
+inoxidable secos para EDA; fuente prioritaria), PMC12700326.
+
+
+================================================================
+3. ARQUITECTURA DE HARDWARE — ENCLOSURE ÚNICO
+================================================================
+
+3.1 DISTRIBUCIÓN
+  Placa principal (enclosure único, cara dorsal): XIAO ESP32-C6,
+  MPU-6050, ADS1115, AD8232ACPZ y su red (Fig. 64), TIA de EDA
+  (MCP6002) con R_drive/Rf/Cf, MOSFET BS250, microSD, driver de
+  alerta (BC337 + LED/buzzer), batería LiPo 450 mAh.
+  Correa (cara ventral): electrodos RA, LA, E1, E2 sostenidos en un
+  soporte único, unidos a la placa con 4 cables RG178.
+  Electrodo RL: ver 3.4.
+  Todo el bus I2C queda dentro de una sola placa.
+
+3.2 CABLE ELECTRODO → PLACA
+  4 cables RG178 (50 ohm, AWG30), uno por electrodo (RA, LA, E1, E2).
+  Datos usados (típicos, verificar con la hoja del proveedor):
+  capacitancia ~95-100 pF/m; PTFE como dieléctrico.
+  Largo: el equipo indicó 5-6 cm; alrededor de la muñeca el recorrido
+  real puede ser 10-15 cm (estimación, medir sobre el diseño).
+    Largo   C cable   Corte RC (1.2 Mohm)   Corte RC (10 Mohm)
+    6 cm    ~6 pF     ~23 kHz               ~2.7 kHz
+    12 cm   ~11 pF    ~12 kHz               ~1.4 kHz
+    30 cm   ~29 pF    ~4.7 kHz              ~0.55 kHz
+  (No incluye la capacitancia de entrada del AD8232 ni parásitas de
+  placa, de pocos pF.) Aun a 30 cm y 10 Mohm el corte queda ~20
+  veces por encima de 24 Hz.
+  Malla: las 4 mallas a AGND SOLO en el extremo de la placa principal;
+  extremo del electrodo sin conectar (evita lazos de tierra).
+  Los 4 cables del mismo largo, sobre todo RA y LA.
+  Fijación: alivio de tracción en cada soldadura al disco; sin
+  holgura suelta; radio de curvatura amplio (Ø ext. ~2-3 mm).
+  Cables baratos: verificar que el conductor central sea de calidad,
+  que la malla tenga buena cobertura y que no haya cortocircuito
+  malla-conductor.
+  Salvedad: el PTFE es un dieléctrico con alta generación
+  triboeléctrica; el riesgo es acotado por el largo, pero no está
+  medido. Inmovilizar el cable es la mitigación principal.
+
+3.3 GUARDING — [DESCARTADO POR LONGITUD]
+  Se investigó el blindaje conducido (driven shield): un buffer de
+  ganancia unitaria excita el blindaje al potencial de la señal, de
+  modo que la tensión sobre la capacitancia cable-blindaje sea ~0 y
+  el movimiento del cable (dC/dt) no inyecte corriente. Es una
+  técnica establecida (ADAS1000, INA116, patentes de ECG), mejor con
+  un buffer por conductor. Complementa al RLD (RLD reduce el modo
+  común en el cuerpo; el guarding reduce lo que se inyecta en el
+  cable). NO se implementa en v1 porque con cable de pocos cm la
+  capacitancia (~6-11 pF), la fuga y el material de cable son
+  despreciables frente a las impedancias de contacto y al artefacto
+  de movimiento de la interfaz electrodo seco-piel.
+  Costos que se evitan: 2-4 canales de op-amp, riesgo de
+  oscilación por carga capacitiva del blindaje, ruido/offset extra
+  sobre un nodo de alta impedancia, consumo, espacio.
+  Reversible: si en banco se atribuyen artefactos al cable, un buffer
+  de guarda es una modificación acotada (MCP6002/MCP6004, CMOS,
+  rail-to-rail, 1.8-6 V). Verificar bias current contra Zcontacto.
+  Nota de método: el argumento de causalidad (el buffer puede estar
+  en la placa principal si no circula corriente por el conductor y
+  el cable es eléctricamente corto) requiere el paso "corriente ~0
+  → conductor equipotencial", no solo "cable << longitud de onda".
+  Queda como registro por si se reabre.
+  [PENDIENTE] Confirmar en banco (Sección 17, prueba 1).
+
+3.4 ELECTRODO RL — [PENDIENTE DE REEVALUAR]
+  Hasta v5.2 RL estaba en la cara dorsal del enclosure, por ser donde
+  vivía el AD8232. Con enclosure único y electrodos ventrales en la
+  correa, ese motivo cambia. Además, el protocolo de banco documentado
+  del proyecto indica que la referencia sin ruido de 50 Hz se obtuvo
+  con RL cerca de RA/LA y no en un segmento corporal distal, y que
+  el ruido de red aparece con alimentación USB. Con RL en la cara
+  dorsal, sigue siendo un segmento distinto al de RA/LA.
+  Opción a evaluar: montar RL en la correa, junto a RA/LA, con un
+  quinto cable RG178 (RLD es la salida de baja impedancia de un lazo
+  activo, y ahora el cable es corto). Decisión explícita del equipo
+  requerida; hasta entonces se mantiene la ubicación dorsal de v5.2.
+
+
+================================================================
+4. MICROCONTROLADOR — XIAO ESP32-C6 (DECISIÓN CERRADA)
+================================================================
+Seeed Studio, SKU 113991254. No reabrir.
+  HP core 160 MHz + LP core 20 MHz; 512 KB SRAM; 4 MB flash;
+  21 x 17.8 mm; regulador SGM6029; deep sleep medido 14.3 uA;
+  cargador LiPo integrado (corriente de carga [PENDIENTE] confirmar
+  en el esquemático de Seeed: github.com/Seeed-Studio/XIAO_Series;
+  si < 100 mA reconsiderar batería); conector JST 1.25 mm.
+  LED de usuario en GPIO15 (strapping pin): OUTPUT en LOW en el
+  arranque y retenido en LOW en deep sleep.
+  Strapping: GPIO4, 5, 8, 9, 15. LP GPIO (RTC): GPIO0-7.
+  I2C HP: GPIO22 (SDA) / GPIO23 (SCL). SPI: GPIO19 (SCK) / GPIO20
+  (MISO) / GPIO18 (MOSI). ADC de header: GPIO0, 1, 2.
+  Advertencia de clon: existe un "ESP32-C6 SuperMini" con LED RGB
+  WS2812 (5-20 mA en sleep). Comprar el XIAO original (LED amarillo
+  simple y JST 1.25 mm en placa).
+  Hasta ahora comprado: XIAO ESP32-C6, MPU-6050 y el módulo AD8232.
+
+
+================================================================
+5. COMPONENTES
+================================================================
+
+5.1 ECG: AD8232ACPZ — CIRCUITO PROPIO (SMD)
+-------------------------------------------
+Encapsulado: LFCSP 20 pines, 4 x 4 mm, pitch 0.5 mm, pad térmico
+expuesto (obligatorio soldarlo). Es el único encapsulado del AD8232.
+Precio de referencia: US$4.54 la unidad (DigiKey, AD8232ACPZ-R7, cut
+tape; ~US$3.45 desde 10 unidades). El costo real es el envío: pedir
+junto con los demás ICs a importar. Comprar más de una unidad.
+Rework del chip del módulo ya comprado: no recomendado (popcorning
+por humedad, pad térmico, limpieza a 0.5 mm, sin forma de verificar
+el chip antes de la placa final, sin repuesto). El módulo SparkFun
+sirve para pruebas de banco.
+Alternativa evaluada [DESCARTADA]: MAX30003 (salida SPI, ADC de 24
+bits, R-R en chip): interesante como trabajo futuro, pero viene en
+TQFN-28 o WLP-30 (igual o más difícil de ensamblar), tampoco está
+en MercadoLibre y obliga a rehacer todo el frontend y el firmware.
+También descartado: front-end discreto con INA128 en DIP (ocupa más
+área, contrario al objetivo de ahorro de espacio).
+BLOQUES NUEVOS RESPECTO AL MÓDULO (resueltos "gratis" por SparkFun):
+  1) Red de referencia REFIN/REFOUT (divisor 10 Mohm + 10 Mohm con
+     bypass 0.1 uF y 1 nF, según Fig. 64). Nodo de alta impedancia:
+     rutear corto y lejos de señales digitales.
+  2) Resistencias de protección de entrada 2 x 180 kohm en +IN/-IN
+     (seguridad ante fallas; se suman a Zcontacto).
+  3) Red de compensación del lazo RLD (RLDFB) de la Fig. 64.
+  4) Filtros HP 2 polos ~7 Hz y LP 2 polos ~24 Hz de la Fig. 64.
+  5) Configuración de FR, AC/DC y SDN a decidir explícitamente.
+  Valores exactos: tomarlos de la Fig. 64 del datasheet Rev. A y
+  verificarlos por simulación (un reporte de foro indica una posible
+  errata: un 1 Mohm que sería 200 kohm, afectando el corte del LPF).
+  No copiarlos sin simular.
+PENDIENTES DE ESTE BLOQUE:
+  - Ganancia total real de la topología (no la del módulo, ~1100) →
+    ajustar PGA del ADS1115 (hoy ±2.048 V).
+  - Atenuación con Zcontacto + 180 kohm.
+  - Detección de leads-off: LO+/LO- se eliminaron en v5.2 por ahorro
+    de conductores; con enclosure único ese motivo desaparece.
+    [PENDIENTE] reevaluar si conviene volver a cablear LO+/LO- a
+    GPIO. Alternativa vigente: detección por saturación de la lectura
+    del ADS1115 (>~0.95 del fondo de escala sostenida ~50 muestras
+    ≈100 ms a 475 SPS; validar en banco).
+  - SDN: permite apagar el AD8232 en IDLE y recuperar 0.17 mA.
+    [PENDIENTE] VERIFICAR LA POLARIDAD EN EL DATASHEET. Una nota
+    previa suponía SDN activo en alto; según recuerdo el pin apaga
+    el chip en nivel bajo (sin confirmar). Si es activo en bajo, es
+    opuesta al gate del BS250 (el P-MOSFET conduce con gate en LOW),
+    y no pueden compartir GPIO sin un inversor.
+  - Precauciones de banco: operar con batería y USB desconectado
+    (50 Hz por fuente y lazo de tierra), descartar los primeros
+    200-500 ms tras el inicio de SAMPLE.
+
+5.2 ADS1115 (ADC I2C de 16 bits) — SE MANTIENE
+-----------------------------------------------
+Justificación revisada: el ADC interno del ESP32-C6 es de 12 bits
+con error de ±40 mV especificado por Espressif (±10-20 mV típico
+tras calibración), sensible a ruido, en la categoría de "precisión
+promedio". El ADS1115 da 62.5 uV/bit con PGA ±2.048 V (más de 600
+veces mejor). La precisión de RMSSD depende de ubicar el pico R por
+interpolación: ±1.16 ms a 475 SPS, ±0.25 ms con interpolación
+parabólica (cifras del proyecto, válidas para el ADS1115).
+Además: modo diferencial (AIN0 = salida AD8232, AIN1 = 1.65 V de
+referencia) sin aritmética, y muestreo determinístico con la
+interrupción ALERT/RDY (flanco FALLING, LATCH activo; pulso de 8 us;
+no usar polling a 475 SPS).
+Ya no hay restricciones de capacitancia de cable: el I2C queda en una
+placa (400 kHz viable; pull-ups a definir, típicamente 2.2-4.7 kohm).
+Canales: AIN0/AIN1 ECG diferencial; AIN2 EDA (single-ended, salida
+del TIA); AIN3 libre.
+Recomendación para EDA: la salida del TIA cae entre ~0.34 V y ~1.58 V;
+usar PGA ±2.048 V (no ±4.096 V, que desaprovecha resolución).
+Dirección I2C: al desaparecer el MAX30205 (0x48), el ADS1115 puede
+volver a 0x48 (ADDR a GND); 0x49 sigue siendo válido. MPU-6050: 0x68.
+Librería: en ESP-IDF, driver propio o portar Adafruit_ADS1X15.
+
+5.3 IMU: MPU-6050 — ver Sección 2.3 (sin cambios).
+
+5.4 EDA: TIA CON MCP6002 (REEMPLAZA AL GROVE GSR)
+--------------------------------------------------
+Ingeniería inversa del Grove GSR (fórmula oficial de Seeed, ADC de 10
+bits, 5 V): R = (1024+2X)*10000/(512-X) = 20000*(1+y)/(1-y), con
+y=X/512. Es la firma de un divisor procesado por un amplificador
+diferencial, referido a 20 kohm. Topología interna no confirmada
+(no se obtuvo el netlist). Solo antecedente: no se replica.
+CIRCUITO ADOPTADO (TIA de una sola polaridad, MCP6002 dual):
+  Canal 1 (Op-amp A): seguidor que bufferiza VREF = VCC/2 = 1.65 V
+    (R1 = R2 = 100 kohm, C1 = 100 nF en el nodo).
+  Canal 2 (Op-amp B): TIA. Entrada "+" a VREF'; entrada "-" a E2 y a
+    Rf en paralelo con Cf hacia la salida. R_drive lleva VCC a E1.
+  R_drive = 390 kohm, Rf = 470 kohm, Cf = 22 nF (corte ~15.4 Hz).
+  Desacople 100 nF entre VCC y GND del MCP6002 (junto al chip).
+  Salida: V_out = VREF' - (VCC - VREF') * Rf / (R_drive + R_piel)
+  Inversa (firmware): R_piel = Rf*(VCC-VREF')/(VREF'-V_out) - R_drive
+MAPA DE PINES DEL MCP6002 (DIP-8/SOIC-8; verificar con datasheet):
+  1 OUTA -> VREF' (y a pin 2 y pin 5)
+  2 -INA -> pin 1        3 +INA -> nodo VREF_raw (R1/R2/C1)
+  4 VSS  -> GND          5 +INB -> VREF' (pin 1)
+  6 -INB -> E2 + Rf + Cf 7 OUTB -> V_out (Rf, Cf) hacia ADS1115 AIN2
+  8 VDD  -> VCC + 100 nF a GND
+CORRIENTE POR LA PIEL (VCC = 3.3 V; límite del proyecto 3.24 uA;
+la corriente es I = (VCC - VREF')/(R_drive + R_piel), con 1.65 V):
+  R_piel    I_piel    V_out
+  200 kohm  2.80 uA   0.34 V   (~14% de margen)
+  500 kohm  1.85 uA   0.78 V
+  1 Mohm    1.19 uA   1.09 V
+  5 Mohm    0.31 uA   1.51 V
+  10 Mohm   0.16 uA   1.58 V
+  R_drive se subió de 100 a 390 kohm respecto al diseño de v4.1:
+  con 100 kohm y un piso real de ~200 kohm la corriente hubiera sido
+  ~5.5 uA, sobre el límite.
+POR QUÉ MCP6002 Y NO LM324/TL074
+  Bias current: MCP6002 ~1 pA (CMOS) vs LM324 ~45 nA típ. / 250 nA
+  máx. Con impedancia efectiva del nodo divisor de ~0.4-1.8 Mohm, el
+  LM324 aportaría 18-450 mV de error (4-21% del rango útil de ~2.1
+  V), variable con temperatura y entre unidades; el MCP6002, ~1 uV.
+  Consumo: ~100 uA por canal vs ~0.7 mA (LM324 clásico).
+  Rail-to-rail E/S y 1.8-6 V: cubre 3.3 V simple. TL074: pensado para
+  ±5 a ±15 V, no apto para 3.3 V simple.
+LIMITACIONES
+  - Una sola polaridad: la salida solo baja de VREF'; se usa ~0.3-1.6 V
+    de los 3.3 V (heredado de la topología).
+  - No requiere potenciómetro: la línea de base se normaliza por
+    software con la calibración por paciente (Sección 8.5).
+  - Descartar las primeras 2-3 lecturas tras energizar.
+POWER-GATE: BS250 (P-channel, TO-92) en topología high-side, en la
+  misma placa; gate por GPIO vía 10-22 kohm (GPIO LOW = conduce =
+  circuito encendido). Ya no cruza ningún cable. Plan B: 2N7000 low-
+  side, verificando fuga por los diodos de entrada del ADS1115.
+  [PENDIENTE] validar saturación del BS250 a 3.3 V en banco (Vgs(th)
+  de -1.0 a -3.5 V según lote). Descartado BC337 como interruptor de
+  lado alto (no satura completo).
+Verificación de ubicación: con el circuito en la placa principal y
+  el cable de E1/E2 de pocos cm, el nodo inversor es tierra virtual
+  y Cf (22 nF) domina sobre la capacitancia del cable (pocos pF).
+  La fuga por PTFE es despreciable frente a los 0.16 uA mínimos
+  (cota pesimista, no medición).
+ALTERNATIVA DE RESGUARDO: LM324 (Grove-like, puente + diferencial)
+  rechazado por bias current. Un MCP6004 (cuádruple, misma familia)
+  queda disponible si hiciera falta más de 2 canales.
+
+5.5 ALMACENAMIENTO: microSD (módulo bare 3.3V SPI)
+---------------------------------------------------
+Lector micro SD/TF SPI de 6 pines, 3.3 V nativo, sin regulador ni
+level-shifter, 17.9 x 17.9 mm (medir con calibre al recibirlo). Se
+eligió por tamaño (los módulos estándar son ~40-45 x 24-25 mm).
+Formato FAT32. ~30 mA en ráfaga de escritura (~50 ms); ~50 uA en
+power-down. Estado: [PENDIENTE] comprar (el equipo indicó que hasta
+ahora solo compró AD8232, XIAO y acelerómetro).
+[PENDIENTE] definir si el enclosure tiene ventana de servicio para
+extraer la tarjeta o si se desarma en laboratorio.
+Estrategia de almacenamiento por niveles:
+  Nivel 1: features por ciclo (HR, RMSSD, score_motor, EDA,
+    score_preictal, alerta; el campo de temperatura desaparece)
+  Nivel 2 (alerta activa): features + señales crudas a 50 Hz
+  Nivel 3 (post-evento): señales crudas 5 min a 50 Hz
+Archivos: datos/YYYYMMDD.csv, config/config.txt (umbrales),
+  config/baseline.txt (percentiles), log/errores.txt
+  (config/temp_offset.txt queda sin uso).
+
+5.6 BATERÍA
+LiPo 3.7 V, 450 mAh, JST 1.25 mm 2P (distinto del JST PH 2.0 mm).
+Con un único enclosure, la batería va dentro del principal o en la
+correa: [PENDIENTE] definir con el equipo de diseño mecánico.
+
+5.7 ALERTA
+BC337 (NPN, TO-92) como driver de LED/buzzer (no requiere precisión
+de tensión). Resistencias limitadoras de 220-470 ohm para 3.3 V.
+El LED/buzzer en sí: [PENDIENTE] comprar.
+
+
+================================================================
+6. MAPA DE PINES — XIAO ESP32-C6
+================================================================
+Fuente: v5.2 + cambios de esta revisión. Se detectaron señales sin
+GPIO asignado en v5.2 (CS de la microSD: el ejemplo de código usaba
+GPIO21, que es el pin de alerta; gate del BS250; ALERT/RDY del
+ADS1115). ASIGNACIÓN PROPUESTA (validar antes de cerrar):
+
+  GPIO0  (D0, RTC)  AD8232 SDN (power-gate en IDLE)        [PROPUESTO]
+  GPIO1  (D1, RTC)  ADS1115 ALERT/RDY (interrupción FALLING)[PROPUESTO]
+  GPIO2  (D2, RTC)  MPU-6050 INT (wakeup ext0, flanco RISING)
+  GPIO21 (D3)       Alerta LED/buzzer (driver BC337)
+  GPIO22 (D4)       I2C SDA (ADS1115, MPU-6050)
+  GPIO23 (D5)       I2C SCL
+  GPIO16 (D6)       CS de la microSD                        [PROPUESTO]
+  GPIO17 (D7)       Gate del BS250 (power-gate del TIA)     [PROPUESTO]
+  GPIO19 (D8)       SPI SCK (microSD)
+  GPIO20 (D9)       SPI MISO (microSD, pull-up 10 kohm)
+  GPIO18 (D10)      SPI MOSI (microSD)
+  GPIO15            LED de usuario (OUTPUT LOW; retenido en sleep)
+  Pads inferiores GPIO6/GPIO7: LP I2C, reservados para v2 con LP core.
+  Con esta propuesta el UART de debug (GPIO16/17) se sacrifica;
+  verificar que la consola por USB del XIAO C6 alcance.
+  Ninguno de los pines propuestos es strapping (4, 5, 8, 9, 15).
+  Si SDN resulta activo en bajo y el gate del BS250 activo en bajo
+  para encender, no comparten GPIO (ver 5.1).
+  Fragmento de arranque (v5.2, adaptar a ESP-IDF):
+    I2C 22/23; SPI(19, 20, 18, CS propio); ADS1115 en 0x48 o 0x49;
+    GPIO15 OUTPUT LOW; wakeup ext0 en GPIO2 (nivel alto) + timer.
+
+
+================================================================
+7. CADENA DE ALIMENTACIÓN
+================================================================
+USB-C → cargador integrado del XIAO → LiPo 450 mAh (JST 1.25 mm)
+LiPo → regulador SGM6029 del XIAO → rail de 3.3 V → todo el sistema.
+Compatibilidad de tensiones (todo desde 3.3 V, nunca LiPo directa):
+  ESP32-C6: 3.0-3.6 V | AD8232: 2.0-3.5 V (el más restrictivo) |
+  MPU-6050: 2.375-3.46 V | ADS1115: 2.0-5.5 V | MCP6002: 1.8-6 V |
+  microSD bare: 3.3 V.
+
+
+================================================================
+8. ARQUITECTURA DE FIRMWARE
+================================================================
+Toolchain: ESP-IDF v6.0.2 en VS Code (estado documentado del
+proyecto). Existe firmware de prueba interactivo de la placa dorsal
+(test_placa_dorsal/main.c) con menú por consola para probar cada
+componente. Desarrollo iterativo con comentarios extensos por el
+contexto académico.
+
+8.1 CICLO DE MUESTREO (sin cambios de valores)
+  tSample = 5 s, tIdle = 13 s (ciclo de 18 s; duty 27.8%).
+  A 60-75 lpm, 5 s entregan 3-5 intervalos R-R para RMSSD.
+  Sin LP core, un IDLE de más de ~10 s deja al IMU sin monitoreo
+  continuo; el wakeup ext0 por INT del MPU-6050 lo cubre.
+
+8.2 MÁQUINA DE ESTADOS
+  IDLE (13 s): MCU en deep sleep; MPU-6050 en accel low-power 40 Hz;
+    AD8232 apagado por SDN si se adopta [PROPUESTO] (si no, activo);
+    TIA de EDA apagado (BS250 en OFF); ADS1115 en power-down; microSD
+    en power-down. Despierta por INT del IMU o por timer de 13 s.
+  SAMPLE (5 s): MCU activo; ADS1115 continuo a 475 SPS por
+    interrupción; cada 100 ms un cambio de mux a AIN2 para leer EDA
+    (10 Hz; ~2.1 ms de hueco en ECG); MPU-6050 a 50 Hz completo; TIA
+    encendido; descartar 200-500 ms iniciales de ECG y 2-3 lecturas
+    iniciales de EDA; escritura de nivel 1 al final.
+  FUSE (<5 ms): validar señal (leads-off por saturación) ANTES de
+    calcular R-R, RMSSD, score motor y nivel de EDA; generar score
+    pre-ictal 0-100. Si hay leads-off: excluir la ventana y marcarla
+    como inválida.
+  DECIDE (<2 ms), WRITE_SD (<50 ms), INTENSIVE (5 min, sin sleep,
+    graba señales crudas; se activa con score >= umbral_1).
+
+8.3 ALERTA GRADUADA
+  Nivel 0: score < umbral_1.
+  Nivel 1: score > umbral_1 sostenido >=2 ciclos, sin movimiento
+    brusco → LED lento + INTENSIVE.
+  Nivel 2: score > umbral_2 sostenido >=3 ciclos, sin patrón de
+    ejercicio → LED + tono intermitente.
+  Nivel 3: score > umbral_3 + patrón convulsivo en IMU → alarma
+    sostenida + grabación de nivel 3.
+
+8.4 CALIBRACIÓN POR PACIENTE
+  24-48 h de uso en modo solo-registro; procesamiento offline en
+  Python; umbral = percentil 95 + 1.5 x IQR de cada parámetro en
+  reposo; se escribe config/config.txt; si no existe, solo registra.
+  Cubre también la línea de base de EDA (elimina el potenciómetro).
+
+8.5 MEMORIA
+  512 KB SRAM. Buffers circulares estáticos, sin malloc; historial a
+  microSD, nunca en RAM. Ventana de análisis de hasta ~26 s de ECG a
+  250 Hz (~13 KB).
+
+
+================================================================
+9. LP CORE
+================================================================
+LP core RISC-V de 20 MHz, ~245 uA en ejecución. Permitiría sondear el
+MPU-6050 por LP I2C (GPIO6/7, bus separado del HP I2C) durante el deep
+sleep y extender el IDLE (27 s → ~40 h teóricas). No reduce el
+mínimo de SAMPLE (piso fisiológico para HRV).
+El bloqueo de v5.2 (sin soporte del LP core en arduino-esp32, issue
+#9721) deja de aplicar como bloqueo al pasar a ESP-IDF, que tiene
+APIs propias para el LP core. [PENDIENTE] evaluar esfuerzo real.
+El wakeup ext0 por GPIO2 ya cumple el objetivo de vigilancia motora
+en v1. Mejora de v2, no bloquea v1.
+
+
+================================================================
+10. PRESUPUESTO ENERGÉTICO (RECALCULADO)
+================================================================
+Cambios: se quita el MAX30205 (0.60 mA en SAMPLE) y el Grove GSR
+(1.5 mA); se agrega el MCP6002 (~0.20 mA, 2 canales x ~100 uA) y no
+se incluye consumo de guarding (descartado). La corriente por la piel
+(<=2.8 uA) es despreciable.
+
+SAMPLE (5 s):  ESP32-C6 HP 51.00 | AD8232 0.17 | ADS1115 0.20 |
+  MPU-6050 3.60 | TIA MCP6002 0.20 | microSD (burst) 0.30
+  TOTAL SAMPLE ≈ 55.47 mA
+IDLE (13 s):  ESP32-C6 deep sleep 0.0143 | AD8232 0.170 (0 con SDN) |
+  ADS1115 0.002 | MPU-6050 LP 0.140 | TIA 0 (BS250 OFF) |
+  microSD power-down 0.050
+  TOTAL IDLE ≈ 0.376 mA (≈ 0.206 mA con SDN)
+Promedio (duty 27.8%): 55.47*0.278 + 0.376*0.722 ≈ 15.69 mA
+Capacidad usable: 450 * 0.85 = 382.5 mAh
+Autonomía sin INTENSIVO ≈ 24.4 h. Con ~1% en INTENSIVO (~60 mA
+estimados, sin medir) ≈ 23.7 h.
+Con SDN en IDLE se recuperan ~0.12 mA promedio (~+0.2 h).
+El ciclo 5 s / 13 s se mantiene. Son estimaciones con valores típicos
+de datasheet: [PENDIENTE] medir con PPK2 o equivalente.
+
+
+================================================================
+11. VALIDACIÓN Y ALCANCE CLÍNICO
+================================================================
+11.1 VALIDACIÓN DEL ALGORITMO
+  Etapa 1: dataset WESAD (acelerómetro, BVP, EDA, temperatura de
+  muñeca). Sirve para validar el pipeline; NO contiene crisis
+  epilépticas, por lo que no dice nada sobre tipos de crisis
+  detectadas. CHB-MIT descartado (EEG, sin señales de muñeca).
+  Etapa 2: requiere aprobación de bioética; calibración de 48 h en
+  período estable; validar alertas necesita crisis documentadas,
+  idealmente con el tipo de crisis clasificado por la neuróloga.
+
+11.2 ALINEACIÓN CON TIPOS DE CRISIS (análisis de esta revisión)
+  Mejor caso: tónico-clónicas generalizadas (GTCS). IMU (patrón
+  motor rítmico), EDA (respuesta más pronunciada) y HRV (activación
+  simpática masiva) dan su máxima señal juntas.
+  Focales: no son un bloque homogéneo. Sin compromiso motor ni
+  autonómico, son invisibles. Las focales de lóbulo temporal suelen
+  dar taquicardia ictal (HRV podría capturar algo sin IMU). Las que
+  evolucionan a bilaterales tónico-clónicas se detectan al
+  generalizar, no en el inicio focal: distinguirlo en la tesis.
+  Ausencias, mioclónicas, tónicas puras y atónicas: expectativa
+  baja (duración muy breve, sin ventana pre-ictal, firma motora
+  distinta a la citada por Beniczky).
+  Hamartoma hipotalámico (crisis gelásticas): fisiología a favor
+  (Cerullo et al. 1998: aumento de PA y FC, vasoconstricción
+  periférica y noradrenalina alta en crisis gelásticas), pero
+  alineación baja para la crisis gelástica en sí: duración típica
+  <20 s y activación descripta como abrupta (puede no haber ventana
+  pre-ictal), sin componente motor (el IMU no puede arbitrar) y con
+  posible dirección invertida (bradicardia ictal descripta por
+  Kahane et al. 1999). El 80% de los pacientes desarrolla otros tipos
+  de crisis entre los 2 y 7 años (incluye tónico-clónicas). Inicio
+  predominantemente pediátrico: fuera del alcance adulto actual.
+
+11.3 ESTADO DE LA EVIDENCIA
+  Con evidencia de valor discriminativo: ECG/HRV, EDA, IMU.
+  Temperatura: evidencia contradictoria/no aplicable al sitio
+  (Sección 2.4).
+
+
+================================================================
+12. DISEÑO DE PCB
+================================================================
+Herramienta: EasyEDA (flujo a JLCPCB). Placa única.
+Reglas de layout críticas:
+  1. AGND separado de DGND, unidos en un punto estrella.
+  2. Ahora hay DOS etapas analógicas (AD8232 y TIA) junto al digital:
+     mantenerlas lejos de ráfagas de microSD y del XIAO.
+  3. Filtros RC en entradas del ADC (100 ohm + 10 nF ECG; 100 ohm +
+     100 nF EDA).
+  4. Trazas RA/LA/RL → AD8232 cortas y alejadas de digitales de
+     conmutación rápida, con plano AGND continuo debajo.
+  5. Con el chip desnudo SÍ existen REFOUT/REFIN/RLDFB: rutearlos
+     como nodos sensibles de alta impedancia (la regla "sin traza de
+     guarda a VREF" era válida solo para el módulo).
+  6. Solo aplicaría traza de guarda al ADS1115 si se confirma su
+     nodo de referencia accesible (no asumir).
+  7. Bypass de 100 nF en VCC/GND de cada IC.
+  8. No cruzar trazas de alta corriente sobre la zona analógica.
+  9. Pull-up de 10 kohm en MISO de la microSD si el módulo no lo trae.
+  10. Malla de los 4 RG178 a AGND en un solo punto (lado placa).
+  11. Encapsulado LFCSP: pads/stencil de 0.5 mm con apertura de
+      pasta para el pad térmico; pedir stencil junto con la PCB.
+  12. Resistencias limitadoras de LED/buzzer de 220-470 ohm.
+Herramientas de soldadura: aire caliente + pasta; chips SOIC/DIP
+con cautín si aplica.
+
+
+================================================================
+13. LISTA DE COMPRAS (GRANDES COMPONENTES)
+================================================================
+YA COMPRADO: XIAO ESP32-C6, MPU-6050 (GY-521), módulo AD8232
+  SparkFun (solo para pruebas de banco).
+IMPORTAR (consolidar en un solo pedido, DigiKey/Mouser):
+  AD8232ACPZ (varias unidades), MCP6002 (varias; opcional MCP6004).
+LOCAL (MercadoLibre):
+  ADS1115 (módulo), microSD bare 3.3 V SPI (pack de 6), LiPo 450 mAh
+  JST 1.25 mm, BS250 y 2N7000 (TO-92), BC337, LED y buzzer, cable
+  RG178 (por metro, sin conectores; malla plateada y buena cobertura;
+  el proveedor y la calidad del conductor pueden variar), chapa AISI
+  316 de 0.5 mm [PENDIENTE] verificar si ya se compró.
+NO COMPRAR: sensor de temperatura (Sección 2.4), Grove GSR, módulo
+  CJMCU-MAX30205.
+Sin definir: conectores de la correa/soporte de electrodos, respaldo
+  compliante para el contacto, materiales de la correa.
+
+
+================================================================
+14. PROBLEMAS Y ESTADO DE RESOLUCIÓN
+================================================================
+[RESUELTO] PPG de muñeca → AD8232 (ECG eléctrico).
+[RESUELTO] LiPo 4.2 V vs AD8232 → regulador del XIAO (3.3 V).
+[RESUELTO] Ventana de 200 ms insuficiente → 5 s.
+[RESUELTO] Registros del MPU-6050 (0x1D/0x1E de MPU-6500) → tabla
+  correcta en 2.3.
+[RESUELTO] CHB-MIT inadecuado → WESAD (etapa 1).
+[RESUELTO] Jitter del ADS1115 por polling → ALERT/RDY FALLING + LATCH.
+[RESUELTO] Señales analógicas cruzando el cable → ya no hay cable
+  entre enclosures (enclosure único).
+[RESUELTO] Conflicto I2C ADS1115/MAX30205 → desaparece con la
+  eliminación del sensor de temperatura.
+[RESUELTO] Decisión de MCU → XIAO ESP32-C6.
+[RESUELTO] Material de electrodos → AISI 316 con pasivado.
+[RESUELTO] Contacto en piel con vello → perforaciones + pestañas.
+[RESUELTO] BSS84 no disponible en THT → BS250 (validar en banco).
+[RESUELTO] Tamaño de microSD → módulo bare 17.9 x 17.9 mm.
+[RESUELTO] Tamaño del Grove GSR y su calibración de rango → circuito
+  propio TIA con MCP6002.
+[RESUELTO] Sensor de temperatura no disponible localmente y con
+  evidencia débil → descartado para v1 (confirmar).
+[RESUELTO] Guarding y cable multiconductor → descartado por longitud.
+[RESUELTO] Uso del ADC interno del C6 → rechazado, se mantiene el
+  ADS1115.
+[RESUELTO] Chip AD8232 del módulo → comprar el AD8232ACPZ nuevo.
+[CORREGIDO] Modelo del Grove GSR (sección 2.2 de v5.2).
+[CORREGIDO] TL074/LM324 no aptos para 3.3 V simple ni para alta
+  impedancia.
+[PENDIENTE] Polaridad de SDN del AD8232 y decisión de apagarlo en IDLE.
+[PENDIENTE] Asignación final de GPIO (Sección 6): CS de microSD, gate
+  del BS250, ALERT/RDY.
+[PENDIENTE] Valores de la Fig. 64: simular, ganancia total, PGA del
+  ADS1115, atenuación con 180 kohm.
+[PENDIENTE] Reevaluar ubicación de RL (Sección 3.4).
+[PENDIENTE] Reevaluar LO+/LO- por hardware (Sección 5.1).
+[PENDIENTE] Rango real de resistencia de piel de muñeca (medir).
+[PENDIENTE] Saturación del BS250 a 3.3 V; nivel de saturación del
+  ADS1115 en leads-off.
+[PENDIENTE] Corriente de carga del XIAO C6 (esquemático de Seeed).
+[PENDIENTE] Diseño de la correa: presión de contacto, geometría fija
+  de los 4 discos, alivio de tracción, ubicación de la batería.
+[PENDIENTE] Dimensiones finales del enclosure y de la placa; ventana
+  de servicio de la microSD; diámetro de RL.
+[PENDIENTE] Calibración individual por paciente (firmware) y
+  umbrales numéricos (con la neuróloga).
+[PENDIENTE] Ensamblado del AD8232ACPZ (JLCPCB con chip consignado o
+  reflow propio).
+[PENDIENTE] Sin RTC (DS3231 por I2C, trabajo futuro).
+[PENDIENTE] LP core para v2 (con ESP-IDF).
+[PENDIENTE] Documento formal de especificaciones técnicas v5.
+[DECLARADO EN ALCANCE] Crisis focales sin compromiso autonómico o
+  motor; SNR estructuralmente menor "todo en muñeca" (Escalona 2017).
+[PARCIALMENTE DEFINIDO] Validación clínica con pacientes.
+
+
+================================================================
+15. CONSULTAS PENDIENTES CON LA NEURÓLOGA
+================================================================
+La reunión ya fue organizada. Preguntar:
+ 1. ¿Qué tipos de crisis maneja la población refractaria local? ¿Hay
+    aura objetivable?
+ 2. ¿Qué haría el paciente o su entorno con la alerta (ventana de
+    utilidad clínica)?
+ 3. ¿Cuántas falsas alarmas por día son tolerables?
+ 4. ¿Qué acceso hay a video-EEG ambulatorio para validar?
+ 5. ¿Qué sensibilidad mínima sería útil?
+ 6. ¿Cuántos minutos de ventana pre-ictal hacen accionable la alerta?
+ 7. ¿Es clínicamente válido un muestreo de HRV cada 18 s (5 s + 13 s)?
+ 8. ¿Sería útil un botón de confirmación o silencio para el paciente?
+ 9. Pedir que clasifique cada crisis registrada durante la validación
+    según tipo (GTCS, focal con o sin evolución, otras) para
+    correlacionar tipo de crisis con desempeño del dispositivo.
+10. ¿Hay pacientes con hamartoma hipotalámico en la población y de
+    qué edad? (etiología pediátrica, ver Sección 11.2).
+
+
+================================================================
+16. FUENTES BIBLIOGRÁFICAS (CON SALVEDADES)
+================================================================
+Verificadas al menos en abstract: Pinto 2021, Jeppesen 2018,
+  Geertsema 2022, Poh 2010, Beniczky 2013 (ver URLs en Sección 2).
+Escalona et al. 2017 (Computing in Cardiology): tabla original
+  consultada; comparación de una sola variable (orientación).
+Haddad et al. 2017 (IEEE TBME 64(12):2979-2987, DOI
+  10.1109/TBME.2017.2754220): solo abstract; falta texto completo.
+Seyal et al. 2025: mide temperatura del canal auditivo (no
+  muñeca); ver Sección 2.4.
+Cerullo et al. 1998 (EEG Clin Neurophysiol 107:317-322): cambios
+  autonómicos ictales en crisis gelásticas por hamartoma.
+Kahane et al. 1999 (Epilepsia 40:522-527): bradicardia ictal en
+  hamartoma hipotalámico (referencia listada en revisiones; no se
+  leyó el texto completo).
+Estudio de muñequera (Sci Rep, 66 pacientes, 161 crisis): [SIN
+  VERIFICAR] autores y año.
+Datasheet AD8232 Rev. A (Fig. 62-65, p. 24): topologías de
+  aplicación. Datasheet ESP-IDF/Espressif: error de ADC del C6.
+Rango de resistencia de piel: patentes de wearable de muñeca,
+  Venables y Christie 1980 (ver 2.2); sin medición directa.
+Hannula y Heikkinen 2006, Anusha et al. 2018, PMC12700326:
+  texto completo pendiente.
+
+
+================================================================
+17. PLAN DE VALIDACIÓN EN BANCO
+================================================================
+Se puede empezar con el módulo SparkFun y sin comprar nada:
+ 1. Cable RG178 de 6-12 cm con electrodos reales: ECG en reposo y
+    con el cable flexionado/traccionado de forma controlada; comparar
+    ruido RMS. Si la diferencia es chica frente al ruido de
+    movimiento del electrodo, el guarding no aporta.
+ 2. Repetir con la correa real puesta, en reposo y con movimiento de
+    muñeca.
+ 3. RL: comparar ubicación dorsal vs junto a RA/LA (con batería y sin
+    USB).
+ 4. EDA: medir R_piel real con multímetro; comparar el TIA contra una
+    resistencia fija de valor conocido con el mismo cable; verificar
+    que V_out no sature en 0 V; descartar las primeras lecturas.
+ 5. BS250: saturación a 3.3 V y tensión que llega al MCP6002.
+ 6. Leads-off: nivel de saturación del ADS1115 y N de muestras.
+ 7. Consumo real con PPK2 en SAMPLE, IDLE e INTENSIVE.
+
+
+================================================================
+18. NOTAS FINALES PARA EL ASISTENTE
+================================================================
+ESTILO DE TRABAJO
+- Estilo crítico constructivo: señalar errores o problemas con
+  enfoque de mejora, alternativas y soluciones concretas.
+- El equipo trabaja con alta precisión técnica y corrige inferencias
+  sin respaldo: distinguir dato confirmado de aproximación.
+- Preferencia por análisis estructurado (tablas, niveles Crítico /
+  Importante / Recomendable) y explicaciones detalladas.
+- Documentos y entregables en español.
+- Verificar fuentes contra el texto real antes de citarlas con peso.
+- Actualizar el documento canónico solo cuando el tema esté asentado.
+
+DECISIONES CERRADAS — NO REABRIR SIN PEDIDO EXPLÍCITO
+- MCU: XIAO ESP32-C6.
+- Un único enclosure, electrodos ventrales en la correa.
+- AD8232ACPZ desnudo, topología Fig. 64 (valores a simular).
+- EDA: TIA propio con MCP6002; sin Grove GSR.
+- ADS1115 se mantiene (resolución y muestreo determinístico).
+- Cable RG178, malla a AGND en un solo extremo.
+- Firmware v1 sin BLE/WiFi; toolchain ESP-IDF.
+- Electrodos: AISI 316, Ø16 (ECG) y Ø11 (EDA).
+- Batería 450 mAh, JST 1.25 mm.
+- Ciclo 5 s SAMPLE / 13 s IDLE.
+
+CIERRE PENDIENTE DE CONFIRMACIÓN EXPLÍCITA
+- Descarte del sensor de temperatura y del guarding.
+- Ubicación de RL, LO+/LO-, SDN, asignación de GPIO.
+
+TERMINOLOGÍA: HRV, RMSSD, pre-ictal, interictal, TIA, DRL/RLD,
+  LFCSP, SNR, EMC, dren/malla de blindaje, guarding, ext0 wakeup,
+  LP core, electrodo seco, GTCS, hamartoma hipotalámico.
+
+PRÓXIMAS TAREAS (orden sugerido)
+ 1. Verificar polaridad de SDN y cerrar el mapa de pines.
+ 2. Simular la Fig. 64 y recalcular ganancia/PGA/atenuación.
+ 3. Decidir ubicación de RL (prueba de banco).
+ 4. Comprar el pedido de importación (AD8232ACPZ + MCP6002).
+ 5. Pruebas de banco de la Sección 17.
+ 6. Diseño esquemático y PCB en EasyEDA.
+ 7. Diseño de la correa y del enclosure (equipo de SolidWorks).
+ 8. Reunión con la neuróloga.
+
+================================================================
+FIN DEL DOCUMENTO DE CONTEXTO — REVISIÓN 5.3
+================================================================
