@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Monitor ECG</title>
+<style>
+/* ------------------------------------------------------------------------
+   Monitor ECG (XIAO-ECG por BLE) - firmware ecg_ble_xiao.ino v3.x
+   Dos vistas: Usuario (semaforo de estado) y Tecnico (ECG y valores).
+   Requiere Web Bluetooth: Chrome en Android o en PC, servido por https o
+   desde localhost.
+   ------------------------------------------------------------------------ */
+:root{
+  --bg:#f4f5f7; --panel:#ffffff; --text:#16181d; --muted:#5d6470; --line:#dfe2e7;
+  --accent:#2f5bea; --ecg:#0f7b3f; --grid:#e8ebef; --beat:#d23c3c;
+  --verde:#1f9d55; --verde-bg:#e3f5ea;
+  --amarillo:#c98a00; --amarillo-bg:#fdf3d6;
+  --rojo:#d0312d; --rojo-bg:#fbe3e2;
+  --gris:#7a808a; --gris-bg:#eceef1;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#111317; --panel:#1a1d23; --text:#eceef2; --muted:#9aa1ad; --line:#2c3038;
+    --accent:#7c9bff; --ecg:#4fd68a; --grid:#23272e; --beat:#ff6b6b;
+    --verde:#3ccf7a; --verde-bg:#14301f;
+    --amarillo:#f2b630; --amarillo-bg:#3a2e0e;
+    --rojo:#ff5a55; --rojo-bg:#3d1615;
+    --gris:#8b919c; --gris-bg:#22262d;
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-tap-highlight-color:transparent}
+header{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--line);
+  padding:10px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+header h1{font-size:17px;margin:0;flex:1;min-width:120px}
+.estado-con{font-size:13px;color:var(--muted)}
+.estado-con b{color:var(--text)}
+button{font:inherit;border:1px solid var(--line);background:var(--panel);color:var(--text);
+  border-radius:10px;padding:8px 14px;cursor:pointer}
+button.prim{background:var(--accent);border-color:var(--accent);color:#fff}
+button:disabled{opacity:.5}
+nav{display:flex;gap:6px;padding:10px 16px 0}
+nav button{flex:1;border-radius:10px 10px 0 0;border-bottom:none}
+nav button.act{background:var(--panel);font-weight:600;color:var(--accent)}
+nav button:not(.act){background:transparent}
+main{padding:0 16px 24px}
+section{display:none;background:var(--panel);border:1px solid var(--line);border-radius:0 0 14px 14px;padding:16px}
+section.act{display:block}
+.aviso{font-size:13px;color:var(--muted);margin:8px 0 0}
+
+/* ---------------- Vista usuario ---------------- */
+#vUsuario{text-align:center}
+.semaforo{margin:8px auto 18px;max-width:420px;border-radius:24px;padding:34px 18px;
+  background:var(--gris-bg);border:3px solid var(--gris);transition:background .4s,border-color .4s}
+.luz{width:150px;height:150px;border-radius:50%;margin:0 auto 18px;background:var(--gris);
+  box-shadow:0 0 0 10px color-mix(in srgb,var(--gris) 22%,transparent);transition:background .4s,box-shadow .4s}
+.semaforo h2{margin:0 0 6px;font-size:26px}
+.semaforo p{margin:0;color:var(--muted);font-size:16px}
+.semaforo.verde{background:var(--verde-bg);border-color:var(--verde)}
+.semaforo.verde .luz{background:var(--verde);box-shadow:0 0 0 10px color-mix(in srgb,var(--verde) 22%,transparent)}
+.semaforo.amarillo{background:var(--amarillo-bg);border-color:var(--amarillo)}
+.semaforo.amarillo .luz{background:var(--amarillo);box-shadow:0 0 0 10px color-mix(in srgb,var(--amarillo) 22%,transparent)}
+.semaforo.rojo{background:var(--rojo-bg);border-color:var(--rojo)}
+.semaforo.rojo .luz{background:var(--rojo);box-shadow:0 0 0 10px color-mix(in srgb,var(--rojo) 22%,transparent);
+  animation:latir 1s ease-in-out infinite}
+@keyframes latir{50%{transform:scale(1.06)}}
+@media (prefers-reduced-motion: reduce){.semaforo.rojo .luz{animation:none}}
+.mov{max-width:420px;margin:0 auto;border-radius:16px;padding:14px 16px;font-size:17px;font-weight:600;
+  display:none;align-items:center;gap:12px;text-align:left;border:2px solid var(--amarillo);background:var(--amarillo-bg)}
+.mov.on{display:flex}
+.mov.fuerte{border-color:var(--rojo);background:var(--rojo-bg)}
+.mov .ico{font-size:26px;line-height:1}
+.leyenda{max-width:420px;margin:18px auto 0;display:grid;gap:6px;text-align:left;font-size:14px;color:var(--muted)}
+.leyenda span{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:8px;vertical-align:-1px}
+
+/* ---------------- Vista tecnica ---------------- */
+.ecgbox{position:relative;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--panel)}
+canvas{display:block;width:100%;height:240px}
+.ecgbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0}
+.ecgbar label{font-size:13px;color:var(--muted)}
+select{font:inherit;padding:6px 8px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--text)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin-top:6px}
+.dato{border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+.dato .k{font-size:12px;color:var(--muted)}
+.dato .v{font-size:19px;font-weight:600;font-variant-numeric:tabular-nums;margin-top:2px}
+.dato .v small{font-size:12px;font-weight:400;color:var(--muted)}
+h3{font-size:14px;margin:18px 0 6px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.diag{margin-top:8px;padding:10px 12px;border-radius:10px;background:var(--gris-bg);font-size:14px}
+.diag.ok{background:var(--verde-bg)} .diag.mal{background:var(--amarillo-bg)}
+.demo{border:1px dashed var(--line);border-radius:10px;padding:10px 12px;margin-top:8px;font-size:14px}
+.demo input[type=range]{width:100%}
+.fila{display:flex;justify-content:space-between;gap:8px}
+.remoto{max-width:420px;margin:12px auto 0;font-size:14px;color:var(--muted)}
+.ntfy{border:1px solid var(--line);border-radius:10px;padding:12px;font-size:14px;display:grid;gap:8px}
+.ntfy input[type=text]{font:inherit;width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--text)}
+.ntfy .est{font-size:13px;color:var(--muted)}
+.ntfy ul{margin:0;padding-left:18px;font-size:13px;color:var(--muted);max-height:140px;overflow:auto}
+.ntfy .err{color:var(--rojo)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Monitor ECG</h1>
+  <span class="estado-con" id="conTxt">Desconectado</span>
+  <button class="prim" id="btnCon">Conectar</button>
+</header>
+
+<nav>
+  <button id="tabU" class="act">Usuario</button>
+  <button id="tabT">Técnico</button>
+</nav>
+
+<main>
+<!-- ======================= VISTA USUARIO ======================= -->
+<section id="vUsuario" class="act">
+  <div class="semaforo" id="sem">
+    <div class="luz"></div>
+    <h2 id="semTit">Sin conexión</h2>
+    <p id="semTxt">Tocá “Conectar” para empezar</p>
+  </div>
+  <div class="remoto" id="remoto"></div>
+  <div class="mov" id="mov"><span class="ico">⚠️</span><span id="movTxt">Mucho movimiento detectado</span></div>
+  <div class="leyenda">
+    <div><span style="background:var(--verde)"></span>Verde: estado normal</div>
+    <div><span style="background:var(--amarillo)"></span>Amarillo: frecuencia cardíaca algo fuera de lo normal</div>
+    <div><span style="background:var(--rojo)"></span>Rojo: frecuencia cardíaca muy alta, atención</div>
+  </div>
+  <p class="aviso">Indicador de prueba basado solo en frecuencia cardíaca y movimiento. No está validado con pacientes y no reemplaza la supervisión.</p>
+</section>
+
+<!-- ======================= VISTA TECNICA ======================= -->
+<section id="vTecnico">
+  <div class="ecgbox"><canvas id="cv"></canvas></div>
+  <div class="ecgbar">
+    <label>Ventana <select id="selVent"><option value="3">3 s</option><option value="5" selected>5 s</option><option value="10">10 s</option></select></label>
+    <label>Escala <select id="selEsc"><option value="0">auto</option><option value="25">±25 mV</option><option value="60">±60 mV</option><option value="120">±120 mV</option><option value="500">±500 mV</option></select></label>
+    <button id="btnPausa">Pausa</button>
+  </div>
+
+  <h3>Cardíaco</h3>
+  <div class="grid">
+    <div class="dato"><div class="k">FC (mediana 10 s)</div><div class="v" id="dFC">–</div></div>
+    <div class="dato"><div class="k">R-R válidos</div><div class="v" id="dNRR">–</div></div>
+    <div class="dato"><div class="k">CV de R-R</div><div class="v" id="dCV">–</div></div>
+    <div class="dato"><div class="k">RMSSD</div><div class="v" id="dRMSSD">–</div></div>
+    <div class="dato"><div class="k">QRS en la entrada</div><div class="v" id="dQRS">–</div></div>
+    <div class="dato"><div class="k">Nivel DC AD8232</div><div class="v" id="dDC">–</div></div>
+    <div class="dato"><div class="k">Leads-off</div><div class="v" id="dLO">–</div></div>
+    <div class="dato"><div class="k">Filtro</div><div class="v" id="dFil">–</div></div>
+  </div>
+  <div class="diag" id="dDiag">Diagnóstico: –</div>
+
+  <h3>Movimiento y EDA</h3>
+  <div class="grid">
+    <div class="dato"><div class="k">Aceleración total</div><div class="v" id="dAcc">–</div></div>
+    <div class="dato"><div class="k">Movimiento (RMS 2 s)</div><div class="v" id="dMov">–</div></div>
+    <div class="dato"><div class="k">Giro total</div><div class="v" id="dGiro">–</div></div>
+    <div class="dato"><div class="k">ax / ay / az</div><div class="v" id="dAxyz" style="font-size:15px">–</div></div>
+    <div class="dato"><div class="k">Temperatura MPU</div><div class="v" id="dTemp">–</div></div>
+    <div class="dato"><div class="k">EDA (A0)</div><div class="v" id="dEDA">–</div></div>
+    <div class="dato"><div class="k">MPU6050 / ADS1115</div><div class="v" id="dOk">–</div></div>
+  </div>
+
+  <h3>Enlace</h3>
+  <div class="grid">
+    <div class="dato"><div class="k">Paquetes ECG/s</div><div class="v" id="dPps">–</div></div>
+    <div class="dato"><div class="k">Paquetes perdidos</div><div class="v" id="dPerd">–</div></div>
+    <div class="dato"><div class="k">Atrasos de muestreo</div><div class="v" id="dAtr">–</div></div>
+    <div class="dato"><div class="k">Estado de usuario</div><div class="v" id="dEstU">–</div></div>
+  </div>
+
+  <h3>Avisos a otro celular (ntfy)</h3>
+  <div class="ntfy">
+    <label>Tema de ntfy <input type="text" id="ntfyTema" autocomplete="off" spellcheck="false"></label>
+    <label><input type="checkbox" id="ntfyOn" checked> Enviar avisos</label>
+    <label><input type="checkbox" id="ntfyVivo" checked> Mensaje silencioso de “sistema activo” cada 15 min</label>
+    <label><input type="checkbox" id="ntfyUbic"> Incluir la ubicación de este celular en las alertas</label>
+    <label><input type="checkbox" id="ntfyDemo"> Enviar avisos reales también en modo demo</label>
+    <div><button id="btnPrueba">Enviar aviso de prueba</button></div>
+    <div class="est" id="ntfyEst">Sin envíos todavía</div>
+    <ul id="ntfyLog"></ul>
+  </div>
+
+  <h3>Modo demo (sin placa)</h3>
+  <div class="demo">
+    <label><input type="checkbox" id="chkDemo"> Simular datos para probar la interfaz</label>
+    <div class="fila" style="margin-top:8px"><span>FC simulada</span><b id="demoFCv">70 lpm</b></div>
+    <input type="range" id="demoFC" min="40" max="180" value="70">
+    <div class="fila"><span>Movimiento simulado</span><b id="demoMovv">0,00 g</b></div>
+    <input type="range" id="demoMov" min="0" max="80" value="0">
+  </div>
+</section>
+</main>
+
+<script>
+"use strict";
+// ==========================================================================
+//  CONFIGURACION DEL SEMAFORO (editar aca)
+//  Criterio provisorio, sin validar con pacientes: solo FC y movimiento.
+// ==========================================================================
+const FC_VERDE_MIN    = 50;   // lpm: de 50 a 100, normal en reposo
+const FC_VERDE_MAX    = 100;
+const FC_AMARILLO_MAX = 120;  // 100-120: algo elevada | mas de 120: rojo
+const FC_BAJA_ROJO    = 40;   // menos de 40: rojo | 40-50: amarillo
+const PERSISTENCIA_S  = 3;    // segundos que debe sostenerse un nivel nuevo
+// Movimiento = RMS de (|a| - 1 g) en los ultimos 2 s (MPU6050 a 10 Hz)
+const MOV_MODERADO_G  = 0.15; // aviso amarillo de movimiento
+const MOV_FUERTE_G    = 0.40; // aviso rojo de movimiento
+const DATO_VIEJO_MS   = 5000; // sin metricas nuevas por 5 s: "sin lectura"
+
+// ==========================================================================
+//  AVISOS A OTRO CELULAR (ntfy) - editar aca
+// ==========================================================================
+const NTFY_SERVIDOR      = "https://ntfy.sh";
+const NTFY_TEMA_DEFECTO  = "auravisproyectoemisordenotificaciones";
+const ALERTA_ROJO_S      = 20;  // rojo sostenido antes de avisar (el semaforo usa 3 s)
+const ALERTA_REPETIR_MIN = 5;   // repetir la alerta mientras siga en rojo
+const ALERTA_FIN_S       = 30;  // fuera de rojo este tiempo: "volvio a la normalidad"
+const SIN_LECTURA_MIN    = 2;   // conectado pero sin lectura confiable: avisar
+const DESCONEXION_S      = 60;  // placa desconectada (sin que se toque el boton): avisar
+const VIVO_MIN           = 15;  // mensaje silencioso de "sistema activo"
+
+// ==========================================================================
+//  PROTOCOLO BLE (ecg_ble_xiao.ino)
+// ==========================================================================
+const SERVICE = "5b1c0001-7a3e-4d8f-9c21-3f6a8e2b4d10";
+const CH_ECG  = "5b1c0002-7a3e-4d8f-9c21-3f6a8e2b4d10";
+const CH_AUX  = "5b1c0003-7a3e-4d8f-9c21-3f6a8e2b4d10";
+const CH_MET  = "5b1c0004-7a3e-4d8f-9c21-3f6a8e2b4d10";
+const FS = 250;
+const DIAG = {
+  0:["ok","Latidos regulares"], 1:["","Midiendo (todavía sin ventana completa)"],
+  2:["mal","Salida fija en un riel: electrodo sin contacto o entrada saturada"],
+  3:["mal","La salida toca un riel: contacto o saturación por offset"],
+  4:["mal","Salida sin el ruido propio del AD8232: etapa de entrada bloqueada"],
+  5:["mal","Nivel DC lejos de 1,65 V"],
+  6:["mal","Domina el ruido fuera de banda (50 Hz)"],
+  7:["mal","Leads-off en más del 10 % de la ventana"],
+  8:["mal","Sin latidos detectados"],
+  9:["mal","Detecciones irregulares (ruido, EMG o latidos perdidos)"]
+};
+const DIAG_NO_CONFIABLE = new Set([2,3,4,7,8]);
+
+// ---------------- estado ----------------
+const $ = id => document.getElementById(id);
+const BUF = FS * 12;                 // 12 s de ECG
+const ecg = new Float32Array(BUF);   // mV
+const beat = new Uint8Array(BUF);
+const loff = new Uint8Array(BUF);
+let nTot = 0;                        // muestras recibidas
+let ultSeq = -1, perdidos = 0, pktCuenta = 0, pps = 0;
+let met = null, metT = 0;
+let aux = null;
+const movHist = [];                  // |a|-1 g, 10 Hz
+let movRMS = null;
+let dispositivo = null, conectado = false, pausa = false, wakeLock = null;
+
+// ---------------- parsers ----------------
+function onECG(dv){
+  const seq = dv.getUint16(0,true);
+  if (ultSeq >= 0){
+    const d = (seq - ultSeq - 1 + 65536) % 65536;
+    if (d > 0 && d < 1000){           // rellenar el hueco para no correr el tiempo
+      perdidos += d;
+      for (let i=0;i<d*8;i++){ const j=nTot%BUF; ecg[j]=NaN; beat[j]=0; loff[j]=0; nTot++; }
+    }
+  }
+  ultSeq = seq; pktCuenta++;
+  const lo = dv.getUint8(2) & 3, k = dv.getUint8(3);
+  const base = nTot;
+  for (let i=0;i<8;i++){
+    const j = (base+i)%BUF;
+    ecg[j] = dv.getInt16(4+2*i,true)/10; beat[j]=0; loff[j]=lo?1:0;
+  }
+  nTot += 8;
+  if (k > 0){ const r = base + 7 - (k-1); if (r >= 0 && nTot - r < BUF) beat[r%BUF] = 1; }
+}
+function onAUX(dv){
+  const r = i => dv.getInt16(2*i,true);
+  aux = { ax:r(0)/16384, ay:r(1)/16384, az:r(2)/16384, temp:r(3)/340+36.53,
+          gx:r(4)/131, gy:r(5)/131, gz:r(6)/131, a0:r(7)*0.000125, fl:dv.getUint8(16) };
+  if (aux.fl & 1){
+    const a = Math.hypot(aux.ax,aux.ay,aux.az);
+    movHist.push(a-1); if (movHist.length > 20) movHist.shift();
+    movRMS = Math.sqrt(movHist.reduce((s,x)=>s+x*x,0)/movHist.length);
+  } else { movHist.length = 0; movRMS = null; }
+  pintarAux();
+}
+function onMET(dv){
+  met = { fc:dv.getUint16(0,true), nrr:dv.getUint8(2), cv:dv.getUint8(3),
+          rmssd:dv.getUint16(4,true), qrs:dv.getUint16(6,true), diag:dv.getUint8(8),
+          fl:dv.getUint8(9), dc:dv.getUint16(10,true), atr:dv.getUint16(12,true) };
+  metT = Date.now();
+  pintarMet();
+  evaluarEstado();
+}
+
+// ---------------- BLE ----------------
+async function conectar(){
+  if (!navigator.bluetooth){
+    alert("Este navegador no tiene Web Bluetooth. Usá Chrome en Android o en PC, con la página servida por https o localhost.");
+    return;
+  }
+  if ($("chkDemo").checked){ $("chkDemo").checked = false; pararDemo(); }
+  try{
+    $("conTxt").textContent = "Buscando…";
+    dispositivo = await navigator.bluetooth.requestDevice({ filters:[{services:[SERVICE]}], optionalServices:[SERVICE] });
+    dispositivo.addEventListener("gattserverdisconnected", alDesconectar);
+    await abrirGatt();
+  }catch(e){
+    $("conTxt").textContent = "Desconectado";
+    if (e.name !== "NotFoundError") alert("No se pudo conectar: " + e.message);
+  }
+}
+async function abrirGatt(){
+  $("conTxt").textContent = "Conectando…";
+  const srv = await dispositivo.gatt.connect();
+  const s = await srv.getPrimaryService(SERVICE);
+  const sub = async (uuid, fn) => {
+    const c = await s.getCharacteristic(uuid);
+    c.addEventListener("characteristicvaluechanged", ev => fn(ev.target.value));
+    await c.startNotifications();
+  };
+  ultSeq = -1;
+  await sub(CH_ECG, onECG); await sub(CH_AUX, onAUX); await sub(CH_MET, onMET);
+  conectado = true;
+  $("conTxt").innerHTML = "Conectado a <b>" + (dispositivo.name || "XIAO-ECG") + "</b>";
+  $("btnCon").textContent = "Desconectar";
+  try{ wakeLock = await navigator.wakeLock?.request("screen"); }catch(e){}
+  if (avisoDesconexEnviado && avisosActivos())
+    enviarAviso({titulo:"Conexión recuperada", prioridad:3, tags:"electric_plug",
+      texto:"El sensor volvió a conectarse. " + hora()});
+  avisoDesconexEnviado = false; desconectadoDesde = null;
+  if (!vivoT) vivoT = Date.now();
+  evaluarEstado();
+}
+async function alDesconectar(){
+  conectado = false;
+  if (desconexionManual){
+    desconexionManual = false; desconectadoDesde = null;
+    if (avisosActivos()) enviarAviso({titulo:"Monitoreo detenido", prioridad:2, tags:"stop_button",
+      texto:"Se desconectó el sensor desde el celular del paciente. " + hora()});
+    resetAvisos();
+  } else if (desconectadoDesde === null) desconectadoDesde = Date.now();
+  $("btnCon").textContent = "Conectar";
+  $("conTxt").textContent = "Reconectando…";
+  evaluarEstado();
+  for (let i=0;i<5 && dispositivo && !conectado;i++){
+    try{ await abrirGatt(); return; }catch(e){ await new Promise(r=>setTimeout(r,1500)); }
+  }
+  if (!conectado) $("conTxt").textContent = "Desconectado";
+}
+$("btnCon").onclick = () => {
+  if (conectado && dispositivo){
+    desconexionManual = true;
+    const d = dispositivo; dispositivo = null; d.gatt.disconnect();
+    try{ wakeLock?.release(); }catch(e){}
+  } else conectar();
+};
+
+// ==========================================================================
+//  ESTADO DE USUARIO (semaforo)
+// ==========================================================================
+let nivelMostrado = "gris", candidato = null, candidatoT = 0;
+function nivelFC(fc){
+  if (fc > FC_AMARILLO_MAX || fc < FC_BAJA_ROJO) return "rojo";
+  if (fc > FC_VERDE_MAX || fc < FC_VERDE_MIN) return "amarillo";
+  return "verde";
+}
+function evaluarEstado(){
+  const hayDatos = (conectado || demoOn) && met && (Date.now()-metT) < DATO_VIEJO_MS;
+  let nivel = "gris", tit, txt;
+  if (!conectado && !demoOn){ tit="Sin conexión"; txt="Tocá “Conectar” para empezar"; }
+  else if (!hayDatos){ tit="Esperando datos"; txt="Mantené el sensor quieto unos segundos"; }
+  else if (met.fc === 0 || DIAG_NO_CONFIABLE.has(met.diag)){
+    tit="Sin lectura"; txt="Revisá que el sensor esté bien colocado";
+  } else {
+    nivel = nivelFC(met.fc);
+  }
+  // Persistencia: un nivel nuevo debe sostenerse PERSISTENCIA_S segundos
+  // (para subir o bajar). Gris (sin lectura) se muestra enseguida.
+  const ahora = Date.now();
+  if (nivel === "gris"){
+    nivelMostrado = nivel; candidato = null;
+  } else if (nivel !== nivelMostrado){
+    if (candidato !== nivel){ candidato = nivel; candidatoT = ahora; }
+    else if (ahora - candidatoT >= PERSISTENCIA_S*1000){
+      if (nivel === "rojo" && navigator.vibrate) navigator.vibrate([400,200,400]);
+      nivelMostrado = nivel; candidato = null;
+    }
+  } else candidato = null;
+
+  const TXT = {
+    verde:   ["Estado normal",            "Frecuencia cardíaca en rango de reposo"],
+    amarillo:["Atención",                 "Frecuencia cardíaca algo fuera de lo normal"],
+    rojo:    ["Alerta",                   "Frecuencia cardíaca muy alta"]
+  };
+  if (met && met.fc && met.fc < FC_VERDE_MIN) { TXT.amarillo[1]="Frecuencia cardíaca algo baja"; TXT.rojo[1]="Frecuencia cardíaca muy baja"; }
+  if (nivelMostrado !== "gris"){ [tit,txt] = TXT[nivelMostrado]; }
+  else if (nivel !== "gris"){ tit="Midiendo…"; txt="Confirmando la lectura"; }
+
+  const sem = $("sem");
+  sem.className = "semaforo " + nivelMostrado;
+  $("semTit").textContent = tit; $("semTxt").textContent = txt;
+  $("dEstU").textContent = nivelMostrado;
+
+  // Aviso de movimiento (independiente del color)
+  const mov = $("mov");
+  const m = hayDatos || (conectado || demoOn) ? movRMS : null;
+  if (m !== null && m >= MOV_MODERADO_G){
+    mov.className = "mov on" + (m >= MOV_FUERTE_G ? " fuerte" : "");
+    $("movTxt").textContent = m >= MOV_FUERTE_G
+      ? "Mucho movimiento detectado"
+      : "Movimiento moderado: la lectura puede ser menos precisa";
+  } else mov.className = "mov";
+
+  gestionarAvisos(nivel);
+}
+setInterval(evaluarEstado, 500);
+
+// ==========================================================================
+//  AVISOS POR NTFY
+//  La pagina hace de puente: cuando hay una alerta, publica un mensaje en el
+//  tema y el otro celular (app ntfy suscripta) recibe una notificacion push.
+//  Se usan parametros en la URL (no encabezados) para que el navegador no
+//  haga una consulta previa de CORS y para poder usar sendBeacon al cerrar.
+// ==========================================================================
+let desconexionManual = false, desconectadoDesde = null, avisoDesconexEnviado = false;
+let rojoDesde = null, alertaActiva = false, ultAlertaT = 0, fueraRojoDesde = null, fcMaxAlerta = 0;
+let grisDesde = null, avisoSinLecturaEnviado = false, vivoT = 0;
+
+const hora = () => new Date().toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
+function temaNtfy(){ return ($("ntfyTema").value || "").trim(); }
+function avisosActivos(){
+  return $("ntfyOn").checked && temaNtfy() !== "" && (!demoOn || $("ntfyDemo").checked);
+}
+function resetAvisos(){
+  rojoDesde = null; alertaActiva = false; fueraRojoDesde = null; fcMaxAlerta = 0;
+  grisDesde = null; avisoSinLecturaEnviado = false; vivoT = 0;
+}
+function urlNtfy(o){
+  const q = new URLSearchParams({ title:o.titulo, priority:String(o.prioridad) });
+  if (o.tags) q.set("tags", o.tags);
+  if (o.click) q.set("click", o.click);
+  return NTFY_SERVIDOR + "/" + encodeURIComponent(temaNtfy()) + "?" + q.toString();
+}
+function logNtfy(txt, error){
+  const li = document.createElement("li");
+  li.textContent = hora() + " · " + txt; if (error) li.className = "err";
+  const ul = $("ntfyLog"); ul.prepend(li); while (ul.children.length > 8) ul.lastChild.remove();
+  $("ntfyEst").textContent = (error ? "Último envío FALLÓ: " : "Último envío: ") + txt + " (" + hora() + ")";
+  $("ntfyEst").className = "est" + (error ? " err" : "");
+}
+// Envia un mensaje. Reintenta hasta 3 veces si no hay internet.
+async function enviarAviso(o, intento = 1){
+  if (!temaNtfy()) return false;
+  try{
+    const r = await fetch(urlNtfy(o), { method:"POST", body:o.texto });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    logNtfy(o.titulo, false);
+    return true;
+  }catch(e){
+    if (intento < 3){
+      setTimeout(() => enviarAviso(o, intento + 1), 5000 * intento);
+      logNtfy(o.titulo + " (reintentando: " + e.message + ")", true);
+    } else logNtfy(o.titulo + " — " + e.message, true);
+    return false;
+  }
+}
+function ubicacion(){
+  return new Promise(res => {
+    if (!$("ntfyUbic").checked || !navigator.geolocation) return res(null);
+    navigator.geolocation.getCurrentPosition(
+      p => res("https://maps.google.com/?q=" + p.coords.latitude.toFixed(5) + "," + p.coords.longitude.toFixed(5)),
+      () => res(null), { timeout:5000, maximumAge:60000, enableHighAccuracy:true });
+  });
+}
+function textoMovimiento(){
+  if (movRMS === null) return "movimiento: sin dato";
+  const t = movRMS >= MOV_FUERTE_G ? "intenso" : movRMS >= MOV_MODERADO_G ? "moderado" : "quieto";
+  return "movimiento " + t + " (" + fmt(movRMS,2) + " g)";
+}
+async function enviarAlertaRoja(repeticion){
+  const fc = met ? met.fc : 0;
+  const baja = fc && fc < FC_VERDE_MIN;
+  const link = await ubicacion();
+  enviarAviso({
+    titulo: (repeticion ? "Sigue la alerta: " : "ALERTA: ") + (baja ? "FC muy baja" : "FC muy alta"),
+    prioridad: 5, tags: "rotating_light", click: link || undefined,
+    texto: "FC " + fc + " lpm · " + textoMovimiento() + " · " + hora() +
+           (link ? "\nUbicación: " + link : "") +
+           "\nIndicador de prueba, no validado con pacientes."
+  });
+  $("remoto").textContent = "Se avisó al contacto (" + hora() + ")";
+}
+function gestionarAvisos(nivel){
+  const ahora = Date.now();
+  if (!avisosActivos()){ rojoDesde = null; return; }
+
+  // --- Alerta roja sostenida, repeticion y fin ---
+  if (nivel === "rojo"){
+    fueraRojoDesde = null;
+    if (rojoDesde === null) rojoDesde = ahora;
+    if (met && met.fc) fcMaxAlerta = Math.max(fcMaxAlerta, met.fc);
+    if (!alertaActiva && ahora - rojoDesde >= ALERTA_ROJO_S*1000){
+      alertaActiva = true; ultAlertaT = ahora; enviarAlertaRoja(false);
+    } else if (alertaActiva && ahora - ultAlertaT >= ALERTA_REPETIR_MIN*60000){
+      ultAlertaT = ahora; enviarAlertaRoja(true);
+    }
+  } else {
+    rojoDesde = null;
+    if (alertaActiva && (nivel === "verde" || nivel === "amarillo")){
+      if (fueraRojoDesde === null) fueraRojoDesde = ahora;
+      if (ahora - fueraRojoDesde >= ALERTA_FIN_S*1000){
+        alertaActiva = false; fueraRojoDesde = null;
+        enviarAviso({ titulo:"Volvió a la normalidad", prioridad:3, tags:"white_check_mark",
+          texto:"FC actual " + (met ? met.fc : "–") + " lpm (máxima durante la alerta: " + fcMaxAlerta + " lpm) · " + hora() });
+        fcMaxAlerta = 0;
+        $("remoto").textContent = "";
+      }
+    }
+  }
+
+  // --- Conectado pero sin lectura confiable ---
+  if ((conectado || demoOn) && nivel === "gris"){
+    if (grisDesde === null) grisDesde = ahora;
+    if (!avisoSinLecturaEnviado && ahora - grisDesde >= SIN_LECTURA_MIN*60000){
+      avisoSinLecturaEnviado = true;
+      enviarAviso({ titulo:"Sin lectura del sensor", prioridad:4, tags:"warning",
+        texto:"Hace " + SIN_LECTURA_MIN + " min que el sensor no da una lectura confiable (¿mal colocado?). " +
+              "Los avisos de FC no funcionan mientras tanto. " + hora() });
+    }
+  } else if (nivel !== "gris"){
+    if (avisoSinLecturaEnviado)
+      enviarAviso({ titulo:"Lectura recuperada", prioridad:3, tags:"white_check_mark",
+        texto:"El sensor vuelve a dar lectura. FC " + (met ? met.fc : "–") + " lpm · " + hora() });
+    grisDesde = null; avisoSinLecturaEnviado = false;
+  }
+
+  // --- Placa desconectada sin tocar el boton ---
+  if (!conectado && desconectadoDesde !== null && !avisoDesconexEnviado &&
+      ahora - desconectadoDesde >= DESCONEXION_S*1000){
+    avisoDesconexEnviado = true;
+    enviarAviso({ titulo:"Se perdió la conexión con el sensor", prioridad:4, tags:"electric_plug,warning",
+      texto:"El sensor se desconectó hace más de " + DESCONEXION_S + " s (batería, distancia o apagado). " +
+            "Los avisos no funcionan mientras tanto. " + hora() });
+  }
+
+  // --- Sistema activo (silencioso) ---
+  if ($("ntfyVivo").checked && (conectado || demoOn)){
+    if (!vivoT) vivoT = ahora;
+    else if (ahora - vivoT >= VIVO_MIN*60000){
+      vivoT = ahora;
+      enviarAviso({ titulo:"Sistema activo", prioridad:1, tags:"green_heart",
+        texto:"Monitoreo funcionando. " + (met && met.fc ? "FC " + met.fc + " lpm · " : "") + textoMovimiento() + " · " + hora() });
+    }
+  }
+}
+
+// Al cerrar la pagina con el sensor conectado: aviso (sendBeacon sobrevive al cierre)
+window.addEventListener("pagehide", () => {
+  if (!conectado || !avisosActivos()) return;
+  const o = { titulo:"Monitor cerrado", prioridad:4, tags:"warning",
+              texto:"Se cerró la página de monitoreo en el celular del paciente. Los avisos no funcionan. " + hora() };
+  try{ navigator.sendBeacon(urlNtfy(o), new Blob([o.texto], {type:"text/plain"})); }catch(e){}
+});
+
+// Configuracion guardada en este celular
+function guardarCfg(){
+  try{ localStorage.setItem("ntfyCfg", JSON.stringify({ tema:$("ntfyTema").value, on:$("ntfyOn").checked,
+    vivo:$("ntfyVivo").checked, ubic:$("ntfyUbic").checked, demo:$("ntfyDemo").checked })); }catch(e){}
+}
+(function cargarCfg(){
+  $("ntfyTema").value = NTFY_TEMA_DEFECTO;
+  try{
+    const c = JSON.parse(localStorage.getItem("ntfyCfg") || "null");
+    if (c){ if (c.tema) $("ntfyTema").value = c.tema; $("ntfyOn").checked = c.on !== false;
+            $("ntfyVivo").checked = c.vivo !== false; $("ntfyUbic").checked = !!c.ubic; $("ntfyDemo").checked = !!c.demo; }
+  }catch(e){}
+  ["ntfyTema","ntfyOn","ntfyVivo","ntfyDemo"].forEach(id => $(id).addEventListener("change", guardarCfg));
+  $("ntfyUbic").addEventListener("change", e => {
+    guardarCfg();
+    if (e.target.checked && navigator.geolocation)   // pedir el permiso ahora, no en medio de una alerta
+      navigator.geolocation.getCurrentPosition(()=>{}, ()=>{ logNtfy("Permiso de ubicación denegado", true); });
+  });
+})();
+$("btnPrueba").onclick = async () => {
+  if (!temaNtfy()){ alert("Escribí el tema de ntfy."); return; }
+  const link = await ubicacion();
+  enviarAviso({ titulo:"Aviso de prueba", prioridad:5, tags:"test_tube", click: link || undefined,
+    texto:"Prueba del monitor ECG. Si te llegó con sonido de alarma, las alertas rojas van a sonar igual. " + hora() +
+          (link ? "\nUbicación: " + link : "") });
+};
+
+// ==========================================================================
+//  VISTA TECNICA
+// ==========================================================================
+const fmt = (x,d=0) => x.toLocaleString("es-AR",{minimumFractionDigits:d,maximumFractionDigits:d});
+function pintarMet(){
+  const m = met;
+  $("dFC").innerHTML   = m.fc ? fmt(m.fc)+" <small>lpm</small>" : "–";
+  $("dNRR").textContent = m.nrr;
+  $("dCV").innerHTML   = m.nrr>=2 ? fmt(m.cv)+" <small>%</small>" : "–";
+  $("dRMSSD").innerHTML= m.rmssd ? fmt(m.rmssd)+" <small>ms</small>" : "–";
+  $("dQRS").innerHTML  = m.qrs ? fmt(m.qrs)+" <small>µV p-p</small>" : "–";
+  $("dDC").innerHTML   = fmt(m.dc/1000,3)+" <small>V</small>";
+  $("dFil").textContent= ((m.fl&1)?"7–24 Hz":"0,5–40 Hz") + ((m.fl&2)?" + notch":"");
+  $("dAtr").textContent= m.atr;
+  const d = DIAG[m.diag] || ["","Código "+m.diag];
+  const el = $("dDiag"); el.className = "diag " + d[0]; el.textContent = "Diagnóstico: " + d[1];
+}
+function pintarAux(){
+  const a = aux;
+  $("dOk").textContent = ((a.fl&1)?"OK":"falla") + " / " + ((a.fl&2)?"OK":"falla");
+  if (a.fl & 1){
+    $("dAcc").innerHTML  = fmt(Math.hypot(a.ax,a.ay,a.az),2)+" <small>g</small>";
+    $("dAxyz").textContent = fmt(a.ax,2)+" / "+fmt(a.ay,2)+" / "+fmt(a.az,2);
+    $("dGiro").innerHTML = fmt(Math.hypot(a.gx,a.gy,a.gz))+" <small>°/s</small>";
+    $("dTemp").innerHTML = fmt(a.temp,1)+" <small>°C</small>";
+  }
+  $("dMov").innerHTML = movRMS!==null ? fmt(movRMS,3)+" <small>g</small>" : "–";
+  $("dEDA").innerHTML = fmt(a.a0,3)+" <small>V</small>";
+}
+setInterval(()=>{
+  pps = pktCuenta; pktCuenta = 0;
+  $("dPps").textContent = (conectado||demoOn) ? pps : "–";
+  $("dPerd").textContent = perdidos;
+  // leads-off en el ultimo segundo
+  let lo = 0; for (let i=1;i<=FS && i<=nTot;i++) lo |= loff[(nTot-i)%BUF];
+  $("dLO").textContent = (conectado||demoOn) ? (lo ? "SÍ" : "no") : "–";
+}, 1000);
+
+// ---------------- grafico ----------------
+const cv = $("cv"), ctx = cv.getContext("2d");
+function css(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function dibujar(){
+  requestAnimationFrame(dibujar);
+  if (!$("vTecnico").classList.contains("act") || pausa) return;
+  const dpr = window.devicePixelRatio||1, W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== Math.round(W*dpr) || cv.height !== Math.round(H*dpr)){ cv.width=Math.round(W*dpr); cv.height=Math.round(H*dpr); }
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.fillStyle = css("--panel"); ctx.fillRect(0,0,W,H);
+  const N = Math.min(FS*(+$("selVent").value), nTot);
+  // grilla de 1 s
+  ctx.strokeStyle = css("--grid"); ctx.lineWidth = 1;
+  const segs = +$("selVent").value;
+  for (let s=1;s<segs;s++){ const x=W*s/segs; ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+  ctx.beginPath(); ctx.moveTo(0,H/2); ctx.lineTo(W,H/2); ctx.stroke();
+  if (N < 2) return;
+  // escala
+  let esc = +$("selEsc").value;
+  if (!esc){
+    let mx = 1;
+    for (let i=0;i<N;i++){ const v=ecg[(nTot-N+i)%BUF]; if (v===v && Math.abs(v)>mx) mx=Math.abs(v); }
+    esc = mx*1.15;
+  }
+  const X = i => W*i/(FS*segs), Y = v => H/2 - v/esc*(H/2-6);
+  // zonas con leads-off
+  ctx.fillStyle = "rgba(208,49,45,.12)";
+  for (let i=0;i<N;i++) if (loff[(nTot-N+i)%BUF]) ctx.fillRect(X(i),0,Math.max(1,W/(FS*segs)),H);
+  // traza
+  ctx.strokeStyle = css("--ecg"); ctx.lineWidth = 1.6; ctx.beginPath();
+  let pen = false;
+  for (let i=0;i<N;i++){
+    const v = ecg[(nTot-N+i)%BUF];
+    if (v!==v){ pen=false; continue; }
+    if (!pen){ ctx.moveTo(X(i),Y(v)); pen=true; } else ctx.lineTo(X(i),Y(v));
+  }
+  ctx.stroke();
+  // latidos
+  ctx.fillStyle = css("--beat");
+  for (let i=0;i<N;i++) if (beat[(nTot-N+i)%BUF]){
+    const x = X(i); ctx.beginPath(); ctx.moveTo(x-5,6); ctx.lineTo(x+5,6); ctx.lineTo(x,14); ctx.fill();
+  }
+  ctx.fillStyle = css("--muted"); ctx.font = "12px system-ui";
+  ctx.fillText("±"+fmt(esc,0)+" mV  ·  "+segs+" s", 8, H-8);
+}
+requestAnimationFrame(dibujar);
+$("btnPausa").onclick = () => { pausa=!pausa; $("btnPausa").textContent = pausa ? "Seguir" : "Pausa"; };
+
+// ---------------- pestañas ----------------
+function verTab(t){
+  $("tabU").classList.toggle("act", t==="u"); $("tabT").classList.toggle("act", t==="t");
+  $("vUsuario").classList.toggle("act", t==="u"); $("vTecnico").classList.toggle("act", t==="t");
+  try{ localStorage.setItem("tab", t); }catch(e){}
+}
+$("tabU").onclick = () => verTab("u"); $("tabT").onclick = () => verTab("t");
+try{ const t = localStorage.getItem("tab"); if (t) verTab(t); }catch(e){}
+
+// ==========================================================================
+//  MODO DEMO: arma paquetes con el mismo formato que el firmware
+// ==========================================================================
+let demoOn = false, demoTimers = [], demoN = 0, demoSeq = 0, demoProxR = 0;
+function g(t,c,w){ return Math.exp(-0.5*((t-c)/w)**2); }
+function iniciarDemo(){
+  demoOn = true; ultSeq = -1; demoN = 0; demoProxR = FS;
+  $("conTxt").textContent = "Modo demo";
+  demoTimers.push(setInterval(()=>{                    // ECG: 31,25 paquetes/s
+    const fc = +$("demoFC").value, rr = Math.round(FS*60/fc), mov = $("demoMov").value/100;
+    const b = new DataView(new ArrayBuffer(20));
+    b.setUint16(0, demoSeq++ & 0xffff, true); b.setUint8(2,0);
+    let k = 0;
+    for (let i=0;i<8;i++){
+      const n = demoN++, ph = (n - (demoProxR - rr)) / FS;
+      if (n >= demoProxR) demoProxR += rr;
+      const t = ((n % rr) + rr) % rr / FS;
+      const v = 60*g(t,0.1,0.011) - 30*g(t,0.125,0.01) + 25*g(t,0.36,0.05) + (Math.random()-0.5)*(4+80*mov);
+      if (n % rr === 25) k = 8 - i;                    // R en la muestra 25 del ciclo
+      b.setInt16(4+2*i, Math.round(v*10), true);
+    }
+    b.setUint8(3, k); onECG(b);
+  }, 32));
+  demoTimers.push(setInterval(()=>{                    // AUX: 10 Hz
+    const mov = $("demoMov").value/100, b = new DataView(new ArrayBuffer(17));
+    const az = 1 + (Math.random()*2-1)*mov*1.7, ax = (Math.random()*2-1)*mov;
+    [ax*16384, 0.02*16384, az*16384, (31-36.53)*340, 0,0,0].forEach((v,i)=>b.setInt16(2*i, Math.max(-32768,Math.min(32767,Math.round(v))), true));
+    b.setInt16(14, 12000, true); b.setUint8(16, 3); onAUX(b);
+  }, 100));
+  demoTimers.push(setInterval(()=>{                    // METRICAS: 2 Hz
+    const fc = +$("demoFC").value, b = new DataView(new ArrayBuffer(14));
+    b.setUint16(0, fc, true); b.setUint8(2, 12); b.setUint8(3, 3); b.setUint16(4, 35, true);
+    b.setUint16(6, 82, true); b.setUint8(8, 0); b.setUint8(9, 2); b.setUint16(10, 1650, true); b.setUint16(12, 0, true);
+    onMET(b);
+  }, 500));
+}
+function pararDemo(){ demoOn=false; resetAvisos(); $("remoto").textContent=""; demoTimers.forEach(clearInterval); demoTimers=[]; met=null; aux=null; movRMS=null; movHist.length=0;
+  if (!conectado) $("conTxt").textContent = "Desconectado"; evaluarEstado(); }
+$("chkDemo").onchange = e => e.target.checked ? (conectado ? (e.target.checked=false, alert("Desconectá la placa para usar el modo demo.")) : iniciarDemo()) : pararDemo();
+$("demoFC").oninput = e => $("demoFCv").textContent = e.target.value + " lpm";
+$("demoMov").oninput = e => $("demoMovv").textContent = fmt(e.target.value/100*0.7,2) + " g aprox.";
+</script>
+</body>
+</html>
